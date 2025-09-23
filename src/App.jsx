@@ -236,7 +236,7 @@ export default function App() {
     const [dailyDetailsOpen, setDailyDetailsOpen] = useState(false);
     // For image preview
     const [imagePreview, setImagePreview] = useState(null);
-
+    const [session, setSession] = useState("");
     const [selectedDay, setSelectedDay] = useState(null); // 'YYYY-MM-DD' string
     const [selectedDayTrades, setSelectedDayTrades] = useState([]);
 
@@ -611,6 +611,7 @@ const handleSaveTrade = async (e) => {
     ratio: null, // optional: add calc if needed
     beforeImage: formData.beforeImage || null,
     createdAt: new Date().toISOString(), // ✅ timestamp for ordering
+    session,
   };
 
   // Update state
@@ -685,7 +686,6 @@ const handleSaveClose = async () => {
 
   const exitPriceNum = parseNumber(modalExitPrice);
   const actualPnLNum = parseNumber(modalActualPnL);
-
   const exitDate = modalExitDate || new Date().toISOString().slice(0, 10);
 
   const mult = getMultiplier(trade.pair);
@@ -696,7 +696,6 @@ const handleSaveClose = async () => {
 
   const pnlPercent = capital ? (actualPnLNum / capital) * 100 : 0;
 
-  // ✅ Validate URLs
   const before = trade.beforeImage && isValidUrl(trade.beforeImage)
     ? String(trade.beforeImage).trim()
     : null;
@@ -705,9 +704,8 @@ const handleSaveClose = async () => {
     ? String(modalAfterImage).trim()
     : null;
 
-  // ✅ Build closed trade with entryPrice and ratio preserved
   const closed = {
-    id: trade.id, // keep the same ID
+    id: trade.id,
     pair: trade.pair,
     type: trade.type,
     entryDate: trade.entryDate,
@@ -719,20 +717,23 @@ const handleSaveClose = async () => {
     points: pointsSigned,
     pnlPercent,
     pnlCurrency: actualPnLNum,
-    status: modalStatus, // active / cancel / closed
+    status: modalStatus,
     risk: trade.risk,
     stopLoss: trade.sl,
     takeProfit: trade.tp,
     ratio: trade.ratio ?? null,
-    beforeImage: before,   // ✅ validated
-    afterImage: after,     // ✅ validated
+    beforeImage: before,
+    afterImage: after,
+    session: trade.session || null, // ✅ preserve session
   };
 
-  // Optimistic state update
-  setTradesOpen((prev) => prev.filter((t) => t.id !== trade.id));
-  setTradesHistory((prev) => [...prev, closed]);
   try {
-    // 🔹 Update Firestore document for this specific trade
+    const updatedTradesOpen = tradesOpen.filter((t) => t.id !== trade.id);
+    const updatedTradesHistory = [...tradesHistory, closed];
+
+    setTradesOpen(updatedTradesOpen);
+    setTradesHistory(updatedTradesHistory);
+
     const tradeRef = doc(
       db,
       `artifacts/${appId}/users/${userId}/tradingJournal/trades`,
@@ -743,7 +744,7 @@ const handleSaveClose = async () => {
   } catch (e) {
     console.error("Error updating trade:", e);
   }
-  // Close modal + reset
+
   setModalOpen(false);
   setSelectedTradeId(null);
   setModalExitDate("");
@@ -788,6 +789,7 @@ const handleSaveEditedTrade = async () => {
       points,
       pnlCurrency,
       pnlPercent,
+       session: editingTrade.session || null, // ✅ preserve session
     };
 
     // ✅ Update local state
@@ -1331,6 +1333,24 @@ const dailyBreakdown = useMemo(() => {
                                                 <option value="3.0">3.0%</option>
                                             </select>
                                         </div>
+                                        <div className="mb-4">
+  <label className="block text-sm font-medium text-gray-200">Session</label>
+  <select
+    value={session}
+    onChange={(e) => setSession(e.target.value)}
+    className="mt-1 block w-full rounded-md bg-gray-800 border border-gray-600 text-gray-200 p-2"
+  >
+    <option value="">Select Session</option>
+    <option value="Sydney">Sydney</option>
+    <option value="Tokyo">Tokyo</option>
+    <option value="London">London</option>
+    <option value="New-York">New-York</option>
+    <option value="Sydney & Tokyo">Sydney & Tokyo</option>
+    <option value="Tokyo & London">Tokyo & London</option>
+    <option value="London & New York">London & New York</option>
+  </select>
+</div>
+
                                         <div className="flex flex-col">
   <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="beforeImage">Before Image URL</label>
   <input
@@ -1935,14 +1955,21 @@ const weeklyRiskData = [...weekData.trades]
 <Modal
   isOpen={dailyDetailsOpen}
   onClose={closeDailyDetails}
-  title={selectedDay ? `Trades for ${new Date(selectedDay).toLocaleDateString('en-GB')}` : "Day Trades"}
+  title={
+    selectedDay
+      ? `Trades for ${new Date(selectedDay).toLocaleDateString("en-GB")}`
+      : "Day Trades"
+  }
 >
   <div className="space-y-4">
     {selectedDayTrades.length === 0 ? (
       <p className="text-gray-400">No trades for this day.</p>
     ) : (
       selectedDayTrades.map((t) => (
-        <div key={t.id} className="bg-gray-700 p-3 rounded-md border border-gray-600">
+        <div
+          key={t.id}
+          className="bg-gray-700 p-3 rounded-md border border-gray-600"
+        >
           <div className="flex justify-between items-start">
             <div>
               <p className="text-sm text-gray-300">Pair</p>
@@ -1950,8 +1977,12 @@ const weeklyRiskData = [...weekData.trades]
             </div>
             <div className="text-right">
               <p className="text-sm text-gray-300">Action</p>
-              <p className={`font-semibold ${t.type === 'long' ? 'text-green-400' : 'text-red-400'}`}>
-                {t.type === 'long' ? 'Long (L)' : 'Short (S)'}
+              <p
+                className={`font-semibold ${
+                  t.type === "long" ? "text-green-400" : "text-red-400"
+                }`}
+              >
+                {t.type === "long" ? "Long (L)" : "Short (S)"}
               </p>
             </div>
           </div>
@@ -1959,128 +1990,137 @@ const weeklyRiskData = [...weekData.trades]
           <div className="grid grid-cols-2 gap-3 mt-3 text-sm text-gray-300">
             <div>
               <p className="text-xs text-gray-400">Entry Date</p>
-              <p>{t.entryDate || '—'}</p>
+              <p>{t.entryDate || "—"}</p>
             </div>
             <div>
               <p className="text-xs text-gray-400">Exit Date</p>
-              <p>{t.exitDate || '—'}</p>
+              <p>{t.exitDate || "—"}</p>
             </div>
             <div>
               <p className="text-xs text-gray-400">Entry Price</p>
-              <p>{t.entryPrice ?? '—'}</p>
+              <p>{t.entryPrice ?? "—"}</p>
             </div>
             <div>
               <p className="text-xs text-gray-400">Exit Price</p>
-              <p>{t.exitPrice ?? '—'}</p>
+              <p>{t.exitPrice ?? "—"}</p>
             </div>
             <div>
               <p className="text-xs text-gray-400">Lot Size</p>
-              <p>{t.lotSize != null ? fmt2(t.lotSize) : '—'}</p>
+              <p>{t.lotSize != null ? fmt2(t.lotSize) : "—"}</p>
             </div>
             <div>
               <p className="text-xs text-gray-400">Risk (%) Used</p>
-              <p>{t.risk != null ? fmt2(t.risk) + '%' : '—'}</p>
+              <p>{t.risk != null ? fmt2(t.risk) + "%" : "—"}</p>
             </div>
             <div>
               <p className="text-xs text-gray-400">Stop Loss</p>
-              <p>{t.stopLoss ?? '—'}</p>
+              <p>{t.stopLoss ?? "—"}</p>
             </div>
             <div>
               <p className="text-xs text-gray-400">Take Profit</p>
-              <p>{t.takeProfit ?? '—'}</p>
+              <p>{t.takeProfit ?? "—"}</p>
             </div>
             <div>
               <p className="text-xs text-gray-400">Ratio</p>
-              <p>{t.ratio ?? '—'}</p>
+              <p>{t.ratio ?? "—"}</p>
             </div>
-            {/* ✅ New Status Row */}
             <div>
               <p className="text-xs text-gray-400">Status</p>
-              <p className="capitalize">{t.status || '—'}</p>
+              <p className="capitalize">{t.status || "—"}</p>
             </div>
 
             <div className="col-span-2">
               <p className="text-xs text-gray-400">P&L ($) / P&L (%)</p>
-              <p className={`${t.pnlCurrency >= 0 ? 'text-green-400' : 'text-red-400'} font-semibold`}>
-                ${fmt2(t.pnlCurrency)} — {fmt2(
-                  t.pnlPercent ?? (t.pnlPercent === 0 ? 0 :
-                  (t.pnlCurrency && capital ? (t.pnlCurrency / capital) * 100 : 0))
-                )}%
+              <p
+                className={`${
+                  t.pnlCurrency >= 0 ? "text-green-400" : "text-red-400"
+                } font-semibold`}
+              >
+                ${fmt2(t.pnlCurrency)} —{" "}
+                {fmt2(
+                  t.pnlPercent ??
+                    (t.pnlPercent === 0
+                      ? 0
+                      : t.pnlCurrency && capital
+                      ? (t.pnlCurrency / capital) * 100
+                      : 0)
+                )}
+                %
               </p>
             </div>
           </div>
 
-{/* Before / After Images */}
-<div className="flex gap-3 mt-3">
+          {/* Before / After Images */}
+          <div className="flex gap-3 mt-3">
+            {/* Before Image */}
+            <div className="w-36 h-24 bg-gray-600 rounded flex flex-col overflow-hidden">
+              {t.beforeImage ? (
+                <>
+                  <button
+                    onClick={() => setImagePreview(t.beforeImage)}
+                    className="w-full h-20 overflow-hidden"
+                    aria-label="Preview before image"
+                  >
+                    <img
+                      src={t.beforeImage}
+                      alt="Before trade"
+                      className="w-full h-full object-cover"
+                    />
+                  </button>
+                  <a
+                    href={t.beforeImage}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-blue-400 underline mt-1 px-1"
+                  >
+                    View Before Image
+                  </a>
+                </>
+              ) : (
+                <span className="text-gray-400 p-2">No before image</span>
+              )}
+            </div>
 
-  {/* Before Image */}
-  <div className="w-36 h-24 bg-gray-600 rounded flex flex-col overflow-hidden">
-    {t.beforeImage ? (
-      <>
-        <button
-          onClick={() => setImagePreview(t.beforeImage)}
-          className="w-full h-20 overflow-hidden"
-          aria-label="Preview before image"
-        >
-          <img
-            src={t.beforeImage}
-            alt="Before trade"
-            className="w-full h-full object-cover"
-          />
-        </button>
-        <a
-          href={t.beforeImage}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-xs text-blue-400 underline mt-1 px-1"
-        >
-          View Before Image
-        </a>
-      </>
-    ) : (
-      <span className="text-gray-400 p-2">No before image</span>
-    )}
-  </div>
-
-  {/* After Image */}
-  <div className="w-36 h-24 bg-gray-600 rounded flex flex-col overflow-hidden">
-    {t.afterImage ? (
-      <>
-        <button
-          onClick={() => setImagePreview(t.afterImage)}
-          className="w-full h-20 overflow-hidden"
-          aria-label="Preview after image"
-        >
-          <img
-            src={t.afterImage}
-            alt="After trade"
-            className="w-full h-full object-cover"
-          />
-        </button>
-        <a
-          href={t.afterImage}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-xs text-blue-400 underline mt-1 px-1"
-        >
-          View After Image
-        </a>
-      </>
-    ) : (
-      <span className="text-gray-400 p-2">No after image</span>
-    )}
-  </div>
-
-</div>
+            {/* After Image */}
+            <div className="w-36 h-24 bg-gray-600 rounded flex flex-col overflow-hidden">
+              {t.afterImage ? (
+                <>
+                  <button
+                    onClick={() => setImagePreview(t.afterImage)}
+                    className="w-full h-20 overflow-hidden"
+                    aria-label="Preview after image"
+                  >
+                    <img
+                      src={t.afterImage}
+                      alt="After trade"
+                      className="w-full h-full object-cover"
+                    />
+                  </button>
+                  <a
+                    href={t.afterImage}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-blue-400 underline mt-1 px-1"
+                  >
+                    View After Image
+                  </a>
+                </>
+              ) : (
+                <span className="text-gray-400 p-2">No after image</span>
+              )}
+            </div>
+          </div>
 
           {/* Notes / Strategy / Session */}
           <div className="mt-3">
             <label className="text-xs text-gray-400">Note</label>
             <textarea
-              value={t.note || ''}
+              value={t.note || ""}
               onChange={(e) => {
-                setSelectedDayTrades(prev =>
-                  prev.map(x => x.id === t.id ? { ...x, note: e.target.value } : x)
+                setSelectedDayTrades((prev) =>
+                  prev.map((x) =>
+                    x.id === t.id ? { ...x, note: e.target.value } : x
+                  )
                 );
               }}
               className="w-full mt-1 p-2 bg-gray-800 text-white rounded"
@@ -2090,10 +2130,12 @@ const weeklyRiskData = [...weekData.trades]
               <div>
                 <label className="text-xs text-gray-400">Strategy</label>
                 <input
-                  value={t.strategy || ''}
+                  value={t.strategy || ""}
                   onChange={(e) =>
-                    setSelectedDayTrades(prev =>
-                      prev.map(x => x.id === t.id ? { ...x, strategy: e.target.value } : x)
+                    setSelectedDayTrades((prev) =>
+                      prev.map((x) =>
+                        x.id === t.id ? { ...x, strategy: e.target.value } : x
+                      )
                     )
                   }
                   className="w-full mt-1 p-2 bg-gray-800 text-white rounded"
@@ -2101,15 +2143,9 @@ const weeklyRiskData = [...weekData.trades]
               </div>
               <div>
                 <label className="text-xs text-gray-400">Session</label>
-                <input
-                  value={t.session || ''}
-                  onChange={(e) =>
-                    setSelectedDayTrades(prev =>
-                      prev.map(x => x.id === t.id ? { ...x, session: e.target.value } : x)
-                    )
-                  }
-                  className="w-full mt-1 p-2 bg-gray-800 text-white rounded"
-                />
+                <p className="mt-1 p-2 bg-gray-800 text-white rounded">
+                  {t.session || "—"}
+                </p>
               </div>
             </div>
           </div>
@@ -2118,10 +2154,13 @@ const weeklyRiskData = [...weekData.trades]
     )}
 
     <div className="flex justify-end mt-4">
-      <button className={`${styles.smallButton}`} onClick={closeDailyDetails}>Close</button>
+      <button className={`${styles.smallButton}`} onClick={closeDailyDetails}>
+        Close
+      </button>
     </div>
   </div>
 </Modal>
+
 {/* 🔍 Fullscreen Image Preview */}
 <Modal
   isOpen={!!imagePreview}
