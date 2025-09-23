@@ -1,81 +1,89 @@
 import React, { useState, useMemo, useEffect } from "react";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea  } from 'recharts';
-import { initializeApp } from "firebase/app";
-import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signOut } from "firebase/auth";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea } from "recharts";
 import { getFirestore, doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
+import { registerUser, loginUser, logoutUser } from "./authService"; // ✅ using helper functions only
+import LoginPage from "./LoginPage";
+import {collection, addDoc, updateDoc, deleteDoc, query, orderBy } from "firebase/firestore";
+import { auth, db } from "./firebase"; // ✅ no getAuth(app) inside App.jsx anymore
+import { onAuthStateChanged, signInWithCustomToken, signInAnonymously } from "firebase/auth";
+
 
 // Inline SVG for icons to avoid external dependencies
 const UpArrowIcon = () => (
-    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 inline ml-1" viewBox="0 0 24 24" fill="currentColor">
-        <path d="M12 4l-8 8h6v8h4v-8h6z" />
-    </svg>
+  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 inline ml-1" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M12 4l-8 8h6v8h4v-8h6z" />
+  </svg>
 );
 
 const DownArrowIcon = () => (
-    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 inline ml-1" viewBox="0 0 24 24" fill="currentColor">
-        <path d="M12 20l8-8h-6V4h-4v8H4z" />
-    </svg>
+  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 inline ml-1" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M12 20l8-8h-6V4h-4v8H4z" />
+  </svg>
 );
 
 const DashboardCard = ({ title, value, color }) => (
-    <div className={`p-6 rounded-2xl shadow-lg transition-all duration-300 transform hover:scale-105 backdrop-blur-md bg-white/10 border border-white/20 text-white`}>
-        <h3 className="text-sm font-semibold opacity-75">{title}</h3>
-        <p className="text-3xl font-bold mt-2 truncate">{value}</p>
-    </div>
+  <div className="p-6 rounded-2xl shadow-lg transition-all duration-300 transform hover:scale-105 backdrop-blur-md bg-white/10 border border-white/20 text-white">
+    <h3 className="text-sm font-semibold opacity-75">{title}</h3>
+    <p className="text-3xl font-bold mt-2 truncate">{value}</p>
+  </div>
 );
 
 // Custom Modal component
 const Modal = ({ isOpen, title, onClose, children }) => {
-    if (!isOpen) return null;
+  if (!isOpen) return null;
 
-    return (
-        <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center p-4 z-50 animate-fade-in">
-            <div className="bg-gray-800 rounded-3xl shadow-2xl w-full max-w-lg p-8 relative transform scale-95 animate-zoom-in border border-gray-700">
-                <button
-                    onClick={onClose}
-                    className="absolute top-4 right-4 text-gray-400 hover:text-white transition-colors duration-200"
-                >
-                    &times;
-                </button>
-                <h2 className="text-3xl font-bold text-white mb-6">{title}</h2>
-                <div className="text-gray-200">
-                    {children}
-                </div>
-            </div>
-        </div>
-    );
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center p-4 z-50 animate-fade-in">
+      <div className="bg-gray-800 rounded-3xl shadow-2xl w-full max-w-lg p-8 relative transform scale-95 animate-zoom-in border border-gray-700">
+        <button
+          onClick={onClose}
+          className="absolute top-4 right-4 text-gray-400 hover:text-white transition-colors duration-200"
+        >
+          &times;
+        </button>
+        <h2 className="text-3xl font-bold text-white mb-6">{title}</h2>
+        <div className="text-gray-200">{children}</div>
+      </div>
+    </div>
+  );
 };
 
 // Helper function to get the week number of a date
 const getWeekNumber = (d) => {
-    const date = new Date(d);
-    date.setHours(0, 0, 0, 0);
-    // Thursday in current week decides the year.
-    date.setDate(date.getDate() + 3 - (date.getDay() + 6) % 7);
-    // January 4 is always in week 1.
-    const week1 = new Date(date.getFullYear(), 0, 4);
-    // Adjust to Thursday in week 1 and count number of weeks from date to week1.
-    return 1 + Math.round(((date.getTime() - week1.getTime()) / 86400000 - 3 + (week1.getDay() + 6) % 7) / 7);
+  const date = new Date(d);
+  date.setHours(0, 0, 0, 0);
+  // Thursday in current week decides the year.
+  date.setDate(date.getDate() + 3 - ((date.getDay() + 6) % 7));
+  // January 4 is always in week 1.
+  const week1 = new Date(date.getFullYear(), 0, 4);
+  // Adjust to Thursday in week 1 and count number of weeks from date to week1.
+  return (
+    1 +
+    Math.round(
+      ((date.getTime() - week1.getTime()) / 86400000 - 3 + ((week1.getDay() + 6) % 7)) / 7
+    )
+  );
 };
 const formatDate = (dateStr) => {
   return new Date(dateStr).toLocaleDateString("en-GB");
 };
 // Helper to generate unique trade ID
-const generateTradeId = () => `${Date.now()}-${Math.floor(Math.random() * 100000)
+const generateTradeId = () =>
+  `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
 
-}`;
 const getMinMaxEquity = (data) => {
-    if (!data || data.length === 0) {
-        return { min: 0, max: 0 };
-    }
-    const equities = data.map(d => d.equity);
-    const min = Math.min(...equities);
-    const max = Math.max(...equities);
-    // Add some padding to the domain
-    const paddedMin = Math.floor(min / 50) * 50 - 50;
-    const paddedMax = Math.ceil(max / 50) * 50 + 50;
-    return { min: paddedMin, max: paddedMax };
+  if (!data || data.length === 0) {
+    return { min: 0, max: 0 };
+  }
+  const equities = data.map((d) => d.equity);
+  const min = Math.min(...equities);
+  const max = Math.max(...equities);
+  // Add some padding to the domain
+  const paddedMin = Math.floor(min / 50) * 50 - 50;
+  const paddedMax = Math.ceil(max / 50) * 50 + 50;
+  return { min: paddedMin, max: paddedMax };
 };
+
 // Classify trade outcome relative to risk
 const classifyTrade = (trade, capital) => {
   const pnl = trade.pnlCurrency || 0;
@@ -86,53 +94,135 @@ const classifyTrade = (trade, capital) => {
   return "win";
 };
 
+const isValidUrl = (s) => {
+  try {
+    const url = new URL(s);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+};
 
 // New function to process trade data for the weekly equity chart
 const processWeeklyEquityData = (trades) => {
-    if (!trades || trades.length === 0) {
-        return [];
+  if (!trades || trades.length === 0) {
+    return [];
+  }
+
+  // Sort trades by date to ensure correct chronological processing
+  const sortedTrades = [...trades].sort(
+    (a, b) => new Date(a.exitDate) - new Date(b.exitDate)
+  );
+
+  const getWeekNumber = (d) => {
+    const date = new Date(d);
+    date.setHours(0, 0, 0, 0);
+    date.setDate(date.getDate() + 4 - (date.getDay() || 7));
+    const yearStart = new Date(date.getFullYear(), 0, 1);
+    const weekNo = Math.ceil(((date - yearStart) / 86400000 + 1) / 7);
+    return weekNo;
+  };
+
+  const weeklyDataMap = new Map();
+  let cumulativeEquity = 1000; // Starting capital
+
+  // First pass: aggregate PnL per week
+  sortedTrades.forEach((trade) => {
+    const weekNum = getWeekNumber(new Date(trade.exitDate));
+    if (!weeklyDataMap.has(weekNum)) {
+      weeklyDataMap.set(weekNum, 0);
     }
-    
-    // Sort trades by date to ensure correct chronological processing
-    const sortedTrades = [...trades].sort((a, b) => new Date(a.exitDate) - new Date(b.exitDate));
+    weeklyDataMap.set(
+      weekNum,
+      weeklyDataMap.get(weekNum) + trade.pnlCurrency
+    );
+  });
 
-    // Helper to get the week number
-    const getWeekNumber = (d) => {
-        const date = new Date(d);
-        date.setHours(0, 0, 0, 0);
-        date.setDate(date.getDate() + 4 - (date.getDay() || 7));
-        const yearStart = new Date(date.getFullYear(), 0, 1);
-        const weekNo = Math.ceil(((date - yearStart) / 86400000 + 1) / 7);
-        return weekNo;
-    };
+  // Second pass: calculate cumulative equity for each week
+  const weeklyEquityData = [];
+  const sortedWeeks = Array.from(weeklyDataMap.keys()).sort((a, b) => a - b);
 
-    const weeklyDataMap = new Map();
-    let cumulativeEquity = 1000; // Starting capital
-
-    // First pass: aggregate PnL per week
-    sortedTrades.forEach(trade => {
-        const weekNum = getWeekNumber(new Date(trade.exitDate));
-        if (!weeklyDataMap.has(weekNum)) {
-            weeklyDataMap.set(weekNum, 0);
-        }
-        weeklyDataMap.set(weekNum, weeklyDataMap.get(weekNum) + trade.pnlCurrency);
+  sortedWeeks.forEach((week) => {
+    const weeklyPnl = weeklyDataMap.get(week);
+    cumulativeEquity += weeklyPnl;
+    weeklyEquityData.push({
+      week: `Week ${week}`,
+      equity: Number(cumulativeEquity.toFixed(2)),
     });
+  });
 
-    // Second pass: calculate cumulative equity for each week
-    const weeklyEquityData = [];
-    const sortedWeeks = Array.from(weeklyDataMap.keys()).sort((a, b) => a - b);
-    
-    sortedWeeks.forEach(week => {
-        const weeklyPnl = weeklyDataMap.get(week);
-        cumulativeEquity += weeklyPnl;
-        weeklyEquityData.push({
-            week: `Week ${week}`,
-            equity: Number(cumulativeEquity.toFixed(2))
-        });
-    });
-
-    return weeklyEquityData;
+  return weeklyEquityData;
 };
+
+// ------------------- AUTH PAGE (inline) -------------------
+const AuthPage = ({ onLogin }) => {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+
+  const handleLoginClick = async () => {
+    try {
+      // using the authService helper
+      const user = await loginUser(email.trim(), password);
+      if (user) onLogin(user.uid);
+    } catch (err) {
+      console.error("Login failed:", err);
+      setError(err.message || "Login error");
+    }
+  };
+
+  const handleSignupClick = async () => {
+    try {
+      const user = await registerUser(email.trim(), password);
+      if (user) onLogin(user.uid);
+    } catch (err) {
+      console.error("Signup failed:", err);
+      setError(err.message || "Signup error");
+    }
+  };
+
+  return (
+    <div className="flex flex-col items-center justify-center min-h-screen bg-gray-900 text-white">
+      <div className="bg-gray-800 p-8 rounded-xl shadow-lg w-full max-w-md">
+        <h2 className="text-2xl font-bold mb-6 text-center">Sign In / Sign Up</h2>
+
+        {error && <div className="mb-4 text-red-400 text-sm">{error}</div>}
+
+        <input
+          type="email"
+          placeholder="Email"
+          className="w-full mb-4 px-3 py-2 rounded bg-gray-700 focus:outline-none"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+
+        <input
+          type="password"
+          placeholder="Password"
+          className="w-full mb-4 px-3 py-2 rounded bg-gray-700 focus:outline-none"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+
+        <button
+          onClick={handleLoginClick}
+          className="w-full py-2 mb-3 bg-blue-600 hover:bg-blue-700 rounded"
+        >
+          Log In
+        </button>
+
+        <button
+          onClick={handleSignupClick}
+          className="w-full py-2 bg-green-600 hover:bg-green-700 rounded"
+        >
+          Sign Up
+        </button>
+      </div>
+    </div>
+  );
+};
+// ----------------- end AuthPage block ---------------------
+
 
 export default function App() {
     // --- Firestore Setup & State ---
@@ -149,6 +239,34 @@ export default function App() {
 
     const [selectedDay, setSelectedDay] = useState(null); // 'YYYY-MM-DD' string
     const [selectedDayTrades, setSelectedDayTrades] = useState([]);
+
+    const handleSignup = async () => {
+    try {
+      const user = await registerUser("test@example.com", "password123");
+      setUserId(user.uid);
+      console.log("Signed up:", user.uid);
+    } catch (err) {
+      console.error("Signup error:", err.message);
+    }
+  };
+
+  const handleLogin = async () => {
+    try {
+      const user = await loginUser("test@example.com", "password123");
+      setUserId(user.uid);
+      console.log("Logged in:", user.uid);
+    } catch (err) {
+      console.error("Login error:", err.message);
+    }
+  };
+
+ const handleLogout = async () => {
+    await logoutUser();
+    setUserId(null);
+  };
+
+
+  
     // Open the daily details modal for a given date (ISO 'YYYY-MM-DD')
 const openDailyDetails = (dateKey, tradeId = null) => {
   setSelectedDay(dateKey);
@@ -181,58 +299,62 @@ const closeDailyDetails = () => {
     const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
     const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
-    // --- Firebase Initialization and Auth State Listener ---
-    useEffect(() => {
-        try {
-            const app = initializeApp(firebaseConfig);
-            const _auth = getAuth(app);
-            const _db = getFirestore(app);
-            setDb(_db);
-            setAuth(_auth);
-
-            const unsubscribe = onAuthStateChanged(_auth, async (user) => {
-                if (user) {
-                    setUserId(user.uid);
-                } else {
-                    if (initialAuthToken) {
-                        await signInWithCustomToken(_auth, initialAuthToken).catch(console.error);
-                    } else {
-                        await signInAnonymously(_auth).catch(console.error);
-                    }
-                }
-                setLoading(false);
-            });
-
-            return () => unsubscribe();
-        } catch (e) {
-            console.error("Firebase initialization failed:", e);
-            setLoading(false);
+// --- Firebase Auth State Listener ---
+useEffect(() => {
+  try {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        setUserId(user.uid);
+      } else {
+        if (initialAuthToken) {
+          await signInWithCustomToken(auth, initialAuthToken).catch(console.error);
+        } else {
+          await signInAnonymously(auth).catch(console.error);
         }
-    }, [firebaseConfig, initialAuthToken]);
-    
+      }
+      setLoading(false);
+    });
 
-    const journalPath = `artifacts/${appId}/users/${userId}/tradingJournal`;
-    const journalDocRef = db ? doc(db, journalPath, "data") : null;
+    return () => unsubscribe();
+  } catch (e) {
+    console.error("Firebase initialization failed:", e);
+    setLoading(false);
+  }
+}, [initialAuthToken]);
 
-    // --- Real-time Data Listener with onSnapshot ---
-    useEffect(() => {
-        if (!journalDocRef || !userId) return;
 
-        const unsubscribe = onSnapshot(journalDocRef, (docSnap) => {
-            if (docSnap.exists()) {
-                const data = docSnap.data();
-                setTradesOpen(data.tradesOpen || []);
-                setTradesHistory(data.tradesHistory || []);
-            } else {
-                setTradesOpen([]);
-                setTradesHistory([]);
-            }
-        }, (error) => {
-            console.error("Error listening to document:", error);
-        });
 
-        return () => unsubscribe();
-    }, [journalDocRef, userId]);
+    const tradesCollectionRef = db
+  ? collection(db, `artifacts/${appId}/users/${userId}/tradingJournal/trades`)
+  : null;
+
+// --- Real-time Data Listener with onSnapshot ---
+useEffect(() => {
+  if (!tradesCollectionRef || !userId) return;
+
+  // optional: order trades by createdAt (latest first)
+  const q = query(tradesCollectionRef, orderBy("createdAt", "desc"));
+
+  const unsubscribe = onSnapshot(
+    q,
+    (snapshot) => {
+      const allTrades = snapshot.docs.map((doc) => ({
+        id: doc.id,
+        ...doc.data(),
+      }));
+
+      // Split into open vs closed
+      setTradesOpen(allTrades.filter((t) => t.status === "open"));
+      setTradesHistory(allTrades.filter((t) => t.status !== "open"));
+    },
+    (error) => {
+      console.error("Error listening to trades:", error);
+    }
+  );
+
+  return () => unsubscribe();
+}, [tradesCollectionRef, userId]);
+
     // --- State Management ---
     const [formData, setFormData] = useState({
         accountType: "Mini",
@@ -398,11 +520,12 @@ const handleSaveTrade = async (e) => {
 
   // ✅ Daily trade limits check (date-based)
   const safeISO = (d) => {
-  if (!d && d !== 0) return "";
-  const parsed = new Date(d);
-  if (isNaN(parsed)) return String(d);
-  return parsed.toISOString().slice(0, 10);
-};
+    if (!d && d !== 0) return "";
+    const parsed = new Date(d);
+    if (isNaN(parsed)) return String(d);
+    return parsed.toISOString().slice(0, 10);
+  };
+
   const tradesForDate = [
     ...tradesOpen.filter(t => t.entryDate === formData.entryDate),
     ...tradesHistory.filter(t => t.entryDate === formData.entryDate)
@@ -437,7 +560,6 @@ const handleSaveTrade = async (e) => {
     return;
   }
 
-
   // Daily risk check
   const newDailyRisk = currentDateSummary.riskUsed + newTradeRisk;
   if (newDailyRisk > DAILY_RISK_LIMIT_PERCENT) {
@@ -468,38 +590,43 @@ const handleSaveTrade = async (e) => {
     ratio = Number(ratio.toFixed(2));
   }
 
+  // ✅ Validate before image URL
+  const before = formData.beforeImage && isValidUrl(formData.beforeImage)
+    ? String(formData.beforeImage).trim()
+    : null;
+
   // ✅ Build new trade object
-  const trade = {
-    id: generateTradeId(),
+   const trade = {
     accountType: formData.accountType,
     pair: formData.pair,
     type: formData.type,
     entryDate: formData.entryDate,
-    entryPrice: entry,
-    sl,
-    tp,
+    entryPrice: parseNumber(formData.price),
+    sl: parseNumber(formData.sl),
+    tp: parseNumber(formData.tp),
     risk: newTradeRisk,
-    lotSize: Number(lot.toFixed(4)),
-    valuePerPip: vpAtSave,
+    lotSize: Number(calculateLotSize_live(formData).toFixed(4)),
+    valuePerPip: getAdjustedVP(formData.pair, formData.accountType),
     status: "open",
-    ratio, // ✅ included
-    beforeImage: formData.beforeImage ? URL.createObjectURL(formData.beforeImage) : null, // 👈 preview link
+    ratio: null, // optional: add calc if needed
+    beforeImage: formData.beforeImage || null,
+    createdAt: new Date().toISOString(), // ✅ timestamp for ordering
   };
 
   // Update state
   const updatedTradesOpen = [...tradesOpen, trade];
   setTradesOpen(updatedTradesOpen);
 
-  // Save to Firestore
-  if (journalDocRef) {
-    try {
-      await setDoc(journalDocRef, {
-        tradesOpen: updatedTradesOpen,
-        tradesHistory,
-      });
-    } catch (e) {
-      console.error("Error writing document:", e);
+  try {
+    if (tradesCollectionRef) {
+      await addDoc(tradesCollectionRef, trade);
+      console.log("Trade saved:", trade);
+
+      // Update local state (optimistic update)
+      setTradesOpen((prev) => [...prev, trade]);
     }
+  } catch (err) {
+    console.error("Error saving trade:", err);
   }
 
   // Reset form
@@ -511,8 +638,10 @@ const handleSaveTrade = async (e) => {
     sl: "",
     tp: "",
     risk: "2.0",
+    beforeImage: "", // ✅ reset image URL input
   }));
 };
+
 
 
     const openCloseModal = (tradeId) => {
@@ -567,6 +696,15 @@ const handleSaveClose = async () => {
 
   const pnlPercent = capital ? (actualPnLNum / capital) * 100 : 0;
 
+  // ✅ Validate URLs
+  const before = trade.beforeImage && isValidUrl(trade.beforeImage)
+    ? String(trade.beforeImage).trim()
+    : null;
+
+  const after = modalAfterImage && isValidUrl(modalAfterImage)
+    ? String(modalAfterImage).trim()
+    : null;
+
   // ✅ Build closed trade with entryPrice and ratio preserved
   const closed = {
     id: trade.id, // keep the same ID
@@ -586,29 +724,25 @@ const handleSaveClose = async () => {
     stopLoss: trade.sl,
     takeProfit: trade.tp,
     ratio: trade.ratio ?? null,
-    beforeImage: trade.beforeImage || null, // keep previous
-    afterImage: modalAfterImage ? URL.createObjectURL(modalAfterImage) : null, // 👈 new
+    beforeImage: before,   // ✅ validated
+    afterImage: after,     // ✅ validated
   };
 
-  // Update states
-  const updatedTradesOpen = tradesOpen.filter((t) => t.id !== trade.id);
-  const updatedTradesHistory = [...tradesHistory, closed];
+  // Optimistic state update
+  setTradesOpen((prev) => prev.filter((t) => t.id !== trade.id));
+  setTradesHistory((prev) => [...prev, closed]);
+  try {
+    // 🔹 Update Firestore document for this specific trade
+    const tradeRef = doc(
+      db,
+      `artifacts/${appId}/users/${userId}/tradingJournal/trades`,
+      trade.id
+    );
 
-  setTradesOpen(updatedTradesOpen);
-  setTradesHistory(updatedTradesHistory);
-
-  // Persist to Firestore
-  if (journalDocRef) {
-    try {
-      await setDoc(journalDocRef, {
-        tradesOpen: updatedTradesOpen,
-        tradesHistory: updatedTradesHistory,
-      });
-    } catch (e) {
-      console.error("Error updating document:", e);
-    }
+    await updateDoc(tradeRef, closed);
+  } catch (e) {
+    console.error("Error updating trade:", e);
   }
-
   // Close modal + reset
   setModalOpen(false);
   setSelectedTradeId(null);
@@ -620,6 +754,7 @@ const handleSaveClose = async () => {
 
 
 
+
 // Save edited trade from modal (recalculates points & pnlCurrency)
 const handleSaveEditedTrade = async () => {
   if (!editingTrade) return;
@@ -627,17 +762,24 @@ const handleSaveEditedTrade = async () => {
 
   try {
     const exitPriceNum = parseNumber(editingTrade.exitPrice);
-    const entryPriceNum = parseNumber(editingTrade.entryPrice ?? editingTrade.price ?? 0);
+    const entryPriceNum = parseNumber(
+      editingTrade.entryPrice ?? editingTrade.price ?? 0
+    );
     const mult = getMultiplier(editingTrade.pair);
 
     // ✅ Same points logic as handleSaveClose
-    const points = editingTrade.type === "long"
-      ? Math.round((exitPriceNum - entryPriceNum) * mult)
-      : Math.round((entryPriceNum - exitPriceNum) * mult);
+    const points =
+      editingTrade.type === "long"
+        ? Math.round((exitPriceNum - entryPriceNum) * mult)
+        : Math.round((entryPriceNum - exitPriceNum) * mult);
 
     // ✅ Same PnL logic as handleSaveClose
-    const pnlCurrency = Number((editingTrade.lotSize * editingTrade.valuePerPip * points).toFixed(2));
-    const pnlPercent = capital ? Number(((pnlCurrency / capital) * 100).toFixed(2)) : 0;
+    const pnlCurrency = Number(
+      (editingTrade.lotSize * editingTrade.valuePerPip * points).toFixed(2)
+    );
+    const pnlPercent = capital
+      ? Number(((pnlCurrency / capital) * 100).toFixed(2))
+      : 0;
 
     const updatedTrade = {
       ...editingTrade,
@@ -648,30 +790,33 @@ const handleSaveEditedTrade = async () => {
       pnlPercent,
     };
 
-    // ✅ Update tradesHistory
-    const updatedTradesHistory = tradesHistory.map(t =>
-      t.id === updatedTrade.id ? updatedTrade : t
+    // ✅ Update local state
+    setTradesHistory((prev) =>
+      prev.map((t) => (t.id === updatedTrade.id ? updatedTrade : t))
     );
-    setTradesHistory(updatedTradesHistory);
+    setTradesOpen((prev) =>
+      prev.map((t) => (t.id === updatedTrade.id ? updatedTrade : t))
+    );
 
-    // ✅ Persist changes to Firestore
-    if (journalDocRef) {
-      await setDoc(journalDocRef, {
-        tradesOpen,
-        tradesHistory: updatedTradesHistory,
-      });
-    }
+    // ✅ Update in Firestore (subcollection doc, not whole journal)
+    const tradeRef = doc(
+      db,
+      `artifacts/${appId}/users/${userId}/tradingJournal/trades`,
+      updatedTrade.id
+    );
+
+    await updateDoc(tradeRef, updatedTrade);
 
     // ✅ Close modal after save
     setIsEditModalOpen(false);
     setEditingTrade(null);
-
   } catch (err) {
     console.error("Error saving edited trade:", err);
     setErrorMessage("Failed to update trade.");
     setShowErrorModal(true);
   }
 };
+
 
 // ✅ Open the edit modal for a trade
 const handleEditTrade = (trade) => {
@@ -684,17 +829,23 @@ const handleEditTrade = (trade) => {
 const handleDeleteTrade = async (tradeId) => {
   console.log("Deleting trade:", tradeId); // debug
   try {
-    const updatedTradesHistory = tradesHistory.filter(t => t.id !== tradeId);
-    setTradesHistory(updatedTradesHistory);
+    // ✅ Update local state first (optimistic update)
+    setTradesHistory((prev) => prev.filter((t) => t.id !== tradeId));
+    setTradesOpen((prev) => prev.filter((t) => t.id !== tradeId));
 
-    if (journalDocRef) {
-      await setDoc(journalDocRef, {
-        tradesOpen,
-        tradesHistory: updatedTradesHistory
-      });
-    }
+    // ✅ Delete specific trade document in Firestore
+    const tradeRef = doc(
+      db,
+      `artifacts/${appId}/users/${userId}/tradingJournal/trades`,
+      tradeId
+    );
+    await deleteDoc(tradeRef);
+
+    // ✅ Close edit modal if open
     setIsEditModalOpen(false);
     setEditingTrade(null);
+
+    console.log("Trade successfully deleted:", tradeId);
   } catch (err) {
     console.error("Error deleting trade:", err);
     setErrorMessage("Failed to delete trade.");
@@ -965,14 +1116,6 @@ const dailyBreakdown = useMemo(() => {
         setTheme(prev => prev === 'dark' ? 'light' : 'dark');
     };
     
-    const handleLogout = async () => {
-        if (auth) {
-            await signOut(auth);
-            // Sign in anonymously after logout to maintain state
-            await signInAnonymously(auth);
-        }
-    };
-
 
     // --- Conditional Rendering Function ---
     const renderContent = () => {
@@ -1189,17 +1332,19 @@ const dailyBreakdown = useMemo(() => {
                                             </select>
                                         </div>
                                         <div className="flex flex-col">
-  <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="beforeImage">Before Image</label>
+  <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="beforeImage">Before Image URL</label>
   <input
-    type="file"
+    type="url"
     id="beforeImage"
-    accept="image/*"
-    onChange={(e) =>
-      setFormData(prev => ({ ...prev, beforeImage: e.target.files[0] }))
-    }
-    className="text-gray-200"
+    name="beforeImage"
+    value={formData.beforeImage || ''}
+    onChange={(e) => setFormData(prev => ({ ...prev, beforeImage: e.target.value }))}
+    placeholder="https://example.com/before.jpg"
+    className={styles.input}
   />
+  <p className="text-xs text-gray-500 mt-1">Paste a publicly accessible image URL (starts with https://)</p>
 </div>
+
 
                                         <div className="mt-4 p-4 rounded-xl bg-gray-700 border border-gray-600 space-y-2 text-sm text-gray-300">
                                             <p><span className="font-semibold">SL Points:</span>{' '}{/* Always show SL in red (use rounded integer points) */}<span className="text-red-500">{liveStopLossPoints ? Math.abs(Math.round(liveStopLossPoints)) : 0}</span></p>
@@ -1415,16 +1560,20 @@ const dailyBreakdown = useMemo(() => {
                                         step="0.01"
                                     />
                                 </div>
-                                <div className="flex flex-col">
-  <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="afterImage">After Image</label>
+                               <div className="flex flex-col">
+  <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="afterImage">After Image URL</label>
   <input
-    type="file"
+    type="url"
     id="afterImage"
-    accept="image/*"
-    onChange={(e) => setModalAfterImage(e.target.files[0])}
-    className="text-gray-200"
+    name="afterImage"
+    value={modalAfterImage || ''}
+    onChange={(e) => setModalAfterImage(e.target.value)}
+    placeholder="https://example.com/after.jpg"
+    className={styles.input}
   />
+  <p className="text-xs text-gray-500 mt-1">Paste after image URL (optional)</p>
 </div>
+
 
                                 <div className="flex flex-col">
                                     <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="modalStatus">Trade Status</label>
@@ -1521,21 +1670,8 @@ const dailyBreakdown = useMemo(() => {
                 const weeklyPercent = weekData.startEquity ? ((weekData.endEquity - weekData.startEquity) / capital) * 100 : 0;
                 // Build weekly equity growth dataset
 // --- Weekly Equity Growth dataset (trade-by-trade, step by step)
-let runningEquity = weekData.startEquity || 0;
-
-const weeklyEquityData = [...weekData.trades]
-  .sort((a, b) => new Date(a.entryDate) - new Date(b.entryDate))
-  .map((trade, index) => {
-    runningEquity += trade.pnlCurrency || 0;
-    return {
-      tradeNo: index + 1,
-      date: new Date(trade.entryDate).toLocaleDateString("en-GB", { day: "numeric", month: "short" }),
-      label: `${new Date(trade.entryDate).toLocaleDateString("en-GB", { day: "numeric", month: "short" })} #${index + 1}`,
-      equity: Number(runningEquity.toFixed(2)),
-      pnl: trade.pnlCurrency,
-    };
-  });
-  let drawdownLine;
+// --- Compute reference lines first ---
+let drawdownLine;
 if (weekData.startEquity < capital) {
   // Equity dropped below baseline → lock to current equity
   drawdownLine = weekData.endEquity;
@@ -1544,10 +1680,35 @@ if (weekData.startEquity < capital) {
   drawdownLine = weekData.startEquity * 0.9;
 }
 
-  // Compute target line value
-const targetLine = weekData.startEquity >= capital 
-  ? weekData.startEquity * 1.1 
-  : capital;
+const targetLine =
+  weekData.startEquity >= capital
+    ? weekData.startEquity * 1.1
+    : capital;
+
+// --- Weekly Equity Growth dataset (trade-by-trade, step by step) ---
+let runningEquity = weekData.startEquity || 0;
+const weeklyEquityData = [...weekData.trades]
+  .sort((a, b) => new Date(a.entryDate) - new Date(b.entryDate))
+  .map((trade, index) => {
+    runningEquity += trade.pnlCurrency || 0;
+    return {
+      tradeNo: index + 1,
+      date: new Date(trade.entryDate).toLocaleDateString("en-GB", {
+        day: "numeric",
+        month: "short",
+      }),
+      label: `${new Date(trade.entryDate).toLocaleDateString("en-GB", {
+        day: "numeric",
+        month: "short",
+      })} #${index + 1}`,
+      equity: Number(runningEquity.toFixed(2)),
+      pnl: trade.pnlCurrency,
+
+      // 👇 safe to add now because values exist
+      target: targetLine,
+      drawdown: drawdownLine,
+    };
+  });
 
   
 const weeklyRiskData = [...weekData.trades]
@@ -1684,62 +1845,66 @@ const weeklyRiskData = [...weekData.trades]
 <div className="mt-10 bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700">
   <h4 className="text-xl font-bold mb-4 text-white">Weekly Equity Growth</h4>
   {weeklyEquityData.length > 0 ? (
-    <ResponsiveContainer width="100%" height={300}>
-      <LineChart data={weeklyEquityData}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#444" />
-        <XAxis 
-          dataKey="label"  // ✅ use trade sequence label, not just date
-          stroke="#ccc"
-        />
-        <YAxis
-    stroke="#ccc"
-    tickCount={10} // Adjust this number for more or fewer ticks
-    domain={['dataMin - 100', 'dataMax + 100']}
-    tickFormatter={(value) => `$${value}`}/>
-<Tooltip contentStyle={{ backgroundColor: '#2d3748', border: 'none', borderRadius: '8px' }} labelStyle={{ color: '#fff' }} />
-      {/* Equity Line */}
+ <ResponsiveContainer width="100%" height={300}>
+  <LineChart data={weeklyEquityData}>
+    <CartesianGrid strokeDasharray="3 3" stroke="#444" />
+    <XAxis dataKey="label" stroke="#ccc" />
+    <YAxis
+      stroke="#ccc"
+      domain={['dataMin - 100', 'dataMax + 100']}
+      tickFormatter={(value) => `$${value}`}
+    />
+    <Tooltip
+      contentStyle={{
+        backgroundColor: '#2d3748',
+        border: 'none',
+        borderRadius: '8px',
+      }}
+        labelStyle={{ color: '#fff' }}
+  itemSorter={(a, b) => {
+    // Fallback if name is missing
+    if (!a?.name || !b?.name) return 0;
+
+    const order = { Target: 1, Equity: 2, Drawdown: 3 };
+    return (order[a.name] || 99) - (order[b.name] || 99);
+  }}
+/>
+
+    {/* Equity Line */}
     <Line
       type="monotone"
       dataKey="equity"
-      stroke="#b7c2eaff"
+      name="Equity"   // ✅ shows "Equity : 1040"
+      stroke="#b7c2ea"
       strokeWidth={2}
       dot={{ r: 4 }}
     />
 
-    {/* ✅ Target Line (like Daily Limit line) */}
+    {/* Target Line */}
     <Line
       type="monotone"
-      dataKey={() => targetLine}
-      stroke="#0ce60fff"
-      dot={false}
+      dataKey="target"
+      name="Target"   // ✅ tooltip will show "Target : 1100"
+      stroke="#0ce60f"
       strokeDasharray="5 5"
       strokeWidth={2}
+      dot={false}
     />
-    {/* 🔴 Drawdown Line */}
-<Line
-  type="monotone"
-  dataKey={() => drawdownLine}
-  stroke="red"
-  dot={false}
-  strokeDasharray="5 5"
-  strokeWidth={2}
-/>
 
-{/* 🔴 Drawdown Label */}
-<ReferenceLine
-  y={drawdownLine}
-  stroke="transparent"
-  label={{
-    value: `Drawdown: $${fmt2(drawdownLine)}`,
-    position: "right",
-    fill: "red",
-    fontSize: 12,
-    fontWeight: "bold"
-  }}
-/>
-
+    {/* Drawdown Line */}
+    <Line
+      type="monotone"
+      dataKey="drawdown"
+      name="Drawdown"  // ✅ tooltip will show "Drawdown : 900"
+      stroke="red"
+      strokeDasharray="5 5"
+      strokeWidth={2}
+      dot={false}
+    />
   </LineChart>
-    </ResponsiveContainer>
+</ResponsiveContainer>
+
+
   ) : (
     <p className="text-gray-400">No equity data for this week.</p>
   )}
@@ -1845,36 +2010,67 @@ const weeklyRiskData = [...weekData.trades]
             </div>
           </div>
 
-         {/* Before / After Images */}
+{/* Before / After Images */}
 <div className="flex gap-3 mt-3">
-  <div
-    className="w-36 h-24 bg-gray-600 rounded flex items-center justify-center overflow-hidden cursor-pointer"
-    onClick={() => t.beforeImage && setImagePreview(t.beforeImage)}
-  >
+
+  {/* Before Image */}
+  <div className="w-36 h-24 bg-gray-600 rounded flex flex-col overflow-hidden">
     {t.beforeImage ? (
-      <img
-        src={t.beforeImage}
-        alt="Before trade"
-        className="w-full h-full object-cover"
-      />
+      <>
+        <button
+          onClick={() => setImagePreview(t.beforeImage)}
+          className="w-full h-20 overflow-hidden"
+          aria-label="Preview before image"
+        >
+          <img
+            src={t.beforeImage}
+            alt="Before trade"
+            className="w-full h-full object-cover"
+          />
+        </button>
+        <a
+          href={t.beforeImage}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-xs text-blue-400 underline mt-1 px-1"
+        >
+          View Before Image
+        </a>
+      </>
     ) : (
-      <span className="text-gray-400">Before</span>
+      <span className="text-gray-400 p-2">No before image</span>
     )}
   </div>
-  <div
-    className="w-36 h-24 bg-gray-600 rounded flex items-center justify-center overflow-hidden cursor-pointer"
-    onClick={() => t.afterImage && setImagePreview(t.afterImage)}
-  >
+
+  {/* After Image */}
+  <div className="w-36 h-24 bg-gray-600 rounded flex flex-col overflow-hidden">
     {t.afterImage ? (
-      <img
-        src={t.afterImage}
-        alt="After trade"
-        className="w-full h-full object-cover"
-      />
+      <>
+        <button
+          onClick={() => setImagePreview(t.afterImage)}
+          className="w-full h-20 overflow-hidden"
+          aria-label="Preview after image"
+        >
+          <img
+            src={t.afterImage}
+            alt="After trade"
+            className="w-full h-full object-cover"
+          />
+        </button>
+        <a
+          href={t.afterImage}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-xs text-blue-400 underline mt-1 px-1"
+        >
+          View After Image
+        </a>
+      </>
     ) : (
-      <span className="text-gray-400">After</span>
+      <span className="text-gray-400 p-2">No after image</span>
     )}
   </div>
+
 </div>
 
           {/* Notes / Strategy / Session */}
@@ -2012,43 +2208,93 @@ const weeklyRiskData = [...weekData.trades]
                 return null;
         }
     };
+// ✅ App return
+if (!userId) {
+  // 🔑 If no user → show login/signup screen
+  return <LoginPage onLogin={setUserId} />;
+}
 
-    return (
-        <div className={`min-h-screen font-sans ${theme === 'dark' ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-900'}`}>
-            <header className="p-4 shadow-lg sticky top-0 z-10 backdrop-blur-md bg-opacity-70">
-                <nav className={styles.navContainer}>
-                    <div className={styles.navTabs}>
-                        <button
-                            onClick={() => setActiveTab("dashboard")}
-                            className={activeTab === "dashboard" ? styles.activeTab : styles.inactiveTab}
-                        >
-                            Dashboard
-                        </button>
-                        <button
-                            onClick={() => setActiveTab("tradeLog")}
-                            className={activeTab === "tradeLog" ? styles.activeTab : styles.inactiveTab}
-                        >
-                            Trade Log
-                        </button>
-                        <button
-                            onClick={() => setActiveTab("weeklyReview")}
-                            className={activeTab === "weeklyReview" ? styles.activeTab : styles.inactiveTab}
-                        >
-                            Weekly Review
-                        </button>
-                        {/* New Settings Tab */}
-                        <button
-                            onClick={() => setActiveTab("settings")}
-                            className={activeTab === "settings" ? styles.activeTab : styles.inactiveTab}
-                        >
-                            Settings
-                        </button>
-                    </div>
-                </nav>
-            </header>
-            <main className="p-4">
-                {renderContent()}
-            </main>
-        </div>
-    );
+ return (
+    <div
+      className={`min-h-screen font-sans ${
+        theme === "dark"
+          ? "bg-gray-900 text-white"
+          : "bg-gray-100 text-gray-900"
+      }`}
+    >
+      {!userId ? (
+        // 🔑 Show login/signup page if no user
+        <AuthPage onLogin={setUserId} />
+      ) : (
+        // ✅ Main app UI after login
+        <>
+          <header className="p-4 shadow-lg sticky top-0 z-10 backdrop-blur-md bg-opacity-70">
+            <nav className={styles.navContainer}>
+              <div className={styles.navTabs}>
+                <button
+                  onClick={() => setActiveTab("dashboard")}
+                  className={
+                    activeTab === "dashboard"
+                      ? styles.activeTab
+                      : styles.inactiveTab
+                  }
+                >
+                  Dashboard
+                </button>
+                <button
+                  onClick={() => setActiveTab("tradeLog")}
+                  className={
+                    activeTab === "tradeLog"
+                      ? styles.activeTab
+                      : styles.inactiveTab
+                  }
+                >
+                  Trade Log
+                </button>
+                <button
+                  onClick={() => setActiveTab("weeklyReview")}
+                  className={
+                    activeTab === "weeklyReview"
+                      ? styles.activeTab
+                      : styles.inactiveTab
+                  }
+                >
+                  Weekly Review
+                </button>
+                <button
+                  onClick={() => setActiveTab("settings")}
+                  className={
+                    activeTab === "settings"
+                      ? styles.activeTab
+                      : styles.inactiveTab
+                  }
+                >
+                  Settings
+                </button>
+              </div>
+
+              <div>
+                <button
+                  onClick={handleLogout}
+                  className="px-3 py-1 bg-red-600 text-white rounded text-sm"
+                >
+                  Log Out
+                </button>
+              </div>
+            </nav>
+          </header>
+
+          <main className="p-4">
+            {renderContent()}
+            {userId && (
+              <p className="mt-4 text-sm text-gray-400">
+                Logged in as:{" "}
+                <span className="font-semibold">{userId}</span>
+              </p>
+            )}
+          </main>
+        </>
+      )}
+    </div>
+  );
 }
