@@ -226,8 +226,6 @@ const AuthPage = ({ onLogin }) => {
 
 export default function App() {
     // --- Firestore Setup & State ---
-    const [db, setDb] = useState(null);
-    const [auth, setAuth] = useState(null);
     const [userId, setUserId] = useState(null);
     const [loading, setLoading] = useState(true);
     const [theme, setTheme] = useState('dark');
