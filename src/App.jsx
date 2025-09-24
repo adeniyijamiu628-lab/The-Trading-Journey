@@ -154,6 +154,9 @@ const processWeeklyEquityData = (trades) => {
   return weeklyEquityData;
 };
 
+// Fixed journal document ID
+const JOURNAL_ID = "main";
+
 // ------------------- AUTH PAGE (inline) -------------------
 const AuthPage = ({ onLogin }) => {
   const [email, setEmail] = useState("");
@@ -322,15 +325,15 @@ useEffect(() => {
 
 
 
-    const tradesCollectionRef = db
-  ? collection(db, `artifacts/${appId}/users/${userId}/tradingJournal/trades`)
+const tradesCollectionRef = userId
+  ? collection(db, "users", userId, "tradingJournal", JOURNAL_ID, "trades")
   : null;
+
 
 // --- Real-time Data Listener with onSnapshot ---
 useEffect(() => {
-  if (!tradesCollectionRef || !userId) return;
+  if (!tradesCollectionRef) return;
 
-  // optional: order trades by createdAt (latest first)
   const q = query(tradesCollectionRef, orderBy("createdAt", "desc"));
 
   const unsubscribe = onSnapshot(
@@ -340,8 +343,6 @@ useEffect(() => {
         id: doc.id,
         ...doc.data(),
       }));
-
-      // Split into open vs closed
       setTradesOpen(allTrades.filter((t) => t.status === "open"));
       setTradesHistory(allTrades.filter((t) => t.status !== "open"));
     },
@@ -351,7 +352,8 @@ useEffect(() => {
   );
 
   return () => unsubscribe();
-}, [tradesCollectionRef, userId]);
+}, [tradesCollectionRef]);
+
 
     // --- State Management ---
     const [formData, setFormData] = useState({
@@ -732,13 +734,18 @@ const handleSaveClose = async () => {
     setTradesOpen(updatedTradesOpen);
     setTradesHistory(updatedTradesHistory);
 
-    const tradeRef = doc(
-      db,
-      `artifacts/${appId}/users/${userId}/tradingJournal/trades`,
-      trade.id
-    );
+const tradeRef = doc(
+  db,
+  "users",
+  userId,
+  "tradingJournal",
+  JOURNAL_ID,
+  "trades",
+  trade.id
+);
+await updateDoc(tradeRef, closedTrade);
 
-    await updateDoc(tradeRef, closed);
+
   } catch (e) {
     console.error("Error updating trade:", e);
   }
@@ -799,13 +806,17 @@ const handleSaveEditedTrade = async () => {
     );
 
     // ✅ Update in Firestore (subcollection doc, not whole journal)
-    const tradeRef = doc(
-      db,
-      `artifacts/${appId}/users/${userId}/tradingJournal/trades`,
-      updatedTrade.id
-    );
+const tradeRef = doc(
+  db,
+  "users",
+  userId,
+  "tradingJournal",
+  JOURNAL_ID,
+  "trades",
+  updatedTrade.id
+);
+await updateDoc(tradeRef, updatedTrade);
 
-    await updateDoc(tradeRef, updatedTrade);
 
     // ✅ Close modal after save
     setIsEditModalOpen(false);
@@ -834,12 +845,17 @@ const handleDeleteTrade = async (tradeId) => {
     setTradesOpen((prev) => prev.filter((t) => t.id !== tradeId));
 
     // ✅ Delete specific trade document in Firestore
-    const tradeRef = doc(
-      db,
-      `artifacts/${appId}/users/${userId}/tradingJournal/trades`,
-      tradeId
-    );
-    await deleteDoc(tradeRef);
+const tradeRef = doc(
+  db,
+  "users",
+  userId,
+  "tradingJournal",
+  JOURNAL_ID,
+  "trades",
+  tradeId
+);
+await deleteDoc(tradeRef);
+
 
     // ✅ Close edit modal if open
     setIsEditModalOpen(false);
