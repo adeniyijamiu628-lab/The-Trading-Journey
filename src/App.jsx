@@ -1,11 +1,12 @@
 import React, { useState, useMemo, useEffect } from "react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea } from "recharts";
-import { getFirestore, doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
 import { registerUser, loginUser, logoutUser } from "./authService"; // ✅ using helper functions only
 import LoginPage from "./LoginPage";
 import {collection, addDoc, updateDoc, deleteDoc, query, orderBy } from "firebase/firestore";
 import { auth, db } from "./firebase"; // ✅ no getAuth(app) inside App.jsx anymore
 import { onAuthStateChanged, signInWithCustomToken, signInAnonymously } from "firebase/auth";
+import { doc, setDoc, getDoc, onSnapshot,getFirestore, serverTimestamp } from "firebase/firestore";
+
 
 
 // Inline SVG for icons to avoid external dependencies
@@ -301,11 +302,15 @@ const closeDailyDetails = () => {
     const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
 // --- Firebase Auth State Listener ---
+
+
 useEffect(() => {
-  try {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+  const unsubscribe = onAuthStateChanged(auth, async (user) => {
+    try {
       if (user) {
         setUserId(user.uid);
+        // ensure user doc exists (merge so you don't overwrite)
+        await setDoc(doc(db, "users", user.uid), { lastSeen: serverTimestamp() }, { merge: true });
       } else {
         if (initialAuthToken) {
           await signInWithCustomToken(auth, initialAuthToken).catch(console.error);
@@ -313,14 +318,14 @@ useEffect(() => {
           await signInAnonymously(auth).catch(console.error);
         }
       }
+    } catch (e) {
+      console.error(e);
+    } finally {
       setLoading(false);
-    });
+    }
+  });
 
-    return () => unsubscribe();
-  } catch (e) {
-    console.error("Firebase initialization failed:", e);
-    setLoading(false);
-  }
+  return () => unsubscribe();
 }, [initialAuthToken]);
 
 
@@ -512,20 +517,14 @@ useEffect(() => {
         setFormData((prev) => ({ ...prev, [name]: value }));
     };
 
+
 const handleSaveTrade = async (e) => {
-  e && e.preventDefault && e.preventDefault();
+  e?.preventDefault?.();
 
   const currentDateSummary = summaryForSelectedDate;
   const newTradeRisk = parseNumber(formData.risk);
 
   // ✅ Daily trade limits check (date-based)
-  const safeISO = (d) => {
-    if (!d && d !== 0) return "";
-    const parsed = new Date(d);
-    if (isNaN(parsed)) return String(d);
-    return parsed.toISOString().slice(0, 10);
-  };
-
   const tradesForDate = [
     ...tradesOpen.filter(t => t.entryDate === formData.entryDate),
     ...tradesHistory.filter(t => t.entryDate === formData.entryDate)
@@ -551,30 +550,26 @@ const handleSaveTrade = async (e) => {
     return;
   }
 
-  // Risk per trade check
+  // ✅ Per-trade risk check
   if (newTradeRisk > PER_TRADE_LIMIT_PERCENT) {
-    setErrorMessage(
-      `Error: Per-trade risk limit of ${PER_TRADE_LIMIT_PERCENT}% exceeded.`
-    );
+    setErrorMessage(`Error: Per-trade risk limit of ${PER_TRADE_LIMIT_PERCENT}% exceeded.`);
     setShowErrorModal(true);
     return;
   }
 
-  // Daily risk check
+  // ✅ Daily risk check
   const newDailyRisk = currentDateSummary.riskUsed + newTradeRisk;
   if (newDailyRisk > DAILY_RISK_LIMIT_PERCENT) {
-    setErrorMessage(
-      `Error: Daily risk limit of ${DAILY_RISK_LIMIT_PERCENT}% for ${formData.entryDate} exceeded.`
-    );
+    setErrorMessage(`Error: Daily risk limit of ${DAILY_RISK_LIMIT_PERCENT}% for ${formData.entryDate} exceeded.`);
     setShowErrorModal(true);
     return;
   }
 
-  // Lot size + value per pip
+  // ✅ Lot size + value per pip
   const lot = calculateLotSize_live(formData);
   const vpAtSave = getAdjustedVP(formData.pair, formData.accountType);
 
-  // Entry, SL, TP
+  // ✅ Entry, SL, TP
   const entry = parseNumber(formData.price);
   const sl = parseNumber(formData.sl);
   const tp = parseNumber(formData.tp);
@@ -595,7 +590,7 @@ const handleSaveTrade = async (e) => {
     ? String(formData.beforeImage).trim()
     : null;
 
-  // ✅ Build new trade object
+  // ✅ Build trade object (without id yet)
    const trade = {
     accountType: formData.accountType,
     pair: formData.pair,
@@ -604,43 +599,37 @@ const handleSaveTrade = async (e) => {
     entryPrice: parseNumber(formData.price),
     sl: parseNumber(formData.sl),
     tp: parseNumber(formData.tp),
-    risk: newTradeRisk,
+    risk: parseNumber(formData.risk),
     lotSize: Number(calculateLotSize_live(formData).toFixed(4)),
     valuePerPip: getAdjustedVP(formData.pair, formData.accountType),
     status: "open",
-    ratio: null, // optional: add calc if needed
-    beforeImage: formData.beforeImage || null,
-    createdAt: new Date().toISOString(), // ✅ timestamp for ordering
+    ratio,
+    beforeImage: before,
+    createdAt: serverTimestamp(),
     session,
   };
 
-  // Update state
-  const updatedTradesOpen = [...tradesOpen, trade];
-  setTradesOpen(updatedTradesOpen);
-
-  try {
-    if (tradesCollectionRef) {
-      await addDoc(tradesCollectionRef, trade);
-      console.log("Trade saved:", trade);
-
-      // Update local state (optimistic update)
-      setTradesOpen((prev) => [...prev, trade]);
-    }
+try {
+    if (!tradesCollectionRef) return;
+    await addDoc(tradesCollectionRef, trade);
+    console.log("Trade saved to Firestore");
+    // ❌ don’t touch setTradesOpen here
   } catch (err) {
     console.error("Error saving trade:", err);
+    setErrorMessage("Failed to save trade.");
+    setShowErrorModal(true);
   }
 
   // Reset form
-  setFormData((prev) => ({
-    ...prev,
+  setFormData({
     pair: "",
     type: "long",
     price: "",
     sl: "",
     tp: "",
     risk: "2.0",
-    beforeImage: "", // ✅ reset image URL input
-  }));
+    beforeImage: "",
+  });
 };
 
 
@@ -680,9 +669,14 @@ const handleSaveTrade = async (e) => {
         }
     };
 
+
 const handleSaveClose = async () => {
   const trade = tradesOpen.find((t) => t.id === selectedTradeId);
-  if (!trade) return;
+  if (!trade) {
+    setErrorMessage("Selected trade not found.");
+    setShowErrorModal(true);
+    return;
+  }
 
   const exitPriceNum = parseNumber(modalExitPrice);
   const actualPnLNum = parseNumber(modalActualPnL);
@@ -704,52 +698,45 @@ const handleSaveClose = async () => {
     ? String(modalAfterImage).trim()
     : null;
 
+  // ✅ Build closed trade object
   const closed = {
-    id: trade.id,
-    pair: trade.pair,
-    type: trade.type,
-    entryDate: trade.entryDate,
-    entryPrice: trade.entryPrice,
+    ...trade,
     exitDate,
     exitPrice: exitPriceNum,
-    lotSize: trade.lotSize,
-    valuePerPip: trade.valuePerPip,
     points: pointsSigned,
     pnlPercent,
     pnlCurrency: actualPnLNum,
-    status: modalStatus,
-    risk: trade.risk,
+    status: "closed",              // force closed
     stopLoss: trade.sl,
     takeProfit: trade.tp,
-    ratio: trade.ratio ?? null,
     beforeImage: before,
     afterImage: after,
-    session: trade.session || null, // ✅ preserve session
+    closedAt: serverTimestamp(),   // Firestore timestamp
   };
 
   try {
-    const updatedTradesOpen = tradesOpen.filter((t) => t.id !== trade.id);
-    const updatedTradesHistory = [...tradesHistory, closed];
-
-    setTradesOpen(updatedTradesOpen);
-    setTradesHistory(updatedTradesHistory);
-
-const tradeRef = doc(
-  db,
-  "users",
-  userId,
-  "tradingJournal",
-  JOURNAL_ID,
-  "trades",
-  trade.id
-);
-await updateDoc(tradeRef, closedTrade);
-
-
+    if (userId && trade.id) {
+      const tradeRef = doc(
+        db,
+        "users",
+        userId,
+        "tradingJournal",
+        JOURNAL_ID,
+        "trades",
+        trade.id
+      );
+      await updateDoc(tradeRef, closed);
+      console.log("Trade closed in Firestore");
+    } else {
+      console.warn("Missing userId or trade.id, skipping Firestore update");
+    }
   } catch (e) {
     console.error("Error updating trade:", e);
+    setErrorMessage("Failed to close trade.");
+    setShowErrorModal(true);
   }
 
+  // ✅ Reset modal only (UI state)
   setModalOpen(false);
   setSelectedTradeId(null);
   setModalExitDate("");
@@ -757,6 +744,7 @@ await updateDoc(tradeRef, closedTrade);
   setModalActualPnL("");
   setModalStatus("active");
 };
+
 
 
 
