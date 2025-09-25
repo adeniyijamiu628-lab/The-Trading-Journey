@@ -1,66 +1,121 @@
-import { useState } from "react";
-import { registerUser, loginUser } from "./authService";
+import React, { useState } from "react";
+import { supabase } from "./supabaseClient";
 
-export default function LoginPage({ onLogin }) {
+const LoginPage = ({ onLogin }) => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [mode, setMode] = useState("login"); // "login" or "signup"
 
-  const handleSignup = async () => {
+  // 🔹 SIGN UP
+  const handleSignupClick = async () => {
     try {
-      const user = await registerUser(email, password);
-      onLogin(user.uid); // pass UID to parent
+      const { data, error } = await supabase.auth.signUp({
+        email: email.trim(),
+        password,
+      });
+
+      if (error) throw error;
+
+      if (data.user) {
+        onLogin(data.user.id); // Supabase UUID
+      }
     } catch (err) {
-      setError(err.message);
+      console.error("Signup failed:", err);
+      setError(err.message || "Signup error");
     }
   };
 
-  const handleLogin = async () => {
+  // 🔹 LOGIN
+  const handleLoginClick = async () => {
     try {
-      const user = await loginUser(email, password);
-      onLogin(user.uid);
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password,
+      });
+
+      if (error) throw error;
+
+      if (data.user) {
+        onLogin(data.user.id); // Supabase UUID
+      }
     } catch (err) {
-      setError(err.message);
+      console.error("Login failed:", err);
+      setError(err.message || "Login error");
     }
   };
 
   return (
-    <div className="flex items-center justify-center min-h-screen bg-gray-900 text-white">
-      <div className="bg-gray-800 p-8 rounded-xl shadow-lg w-full max-w-md">
-        <h1 className="text-2xl font-bold mb-6 text-center">Trading Journal</h1>
+    <div className="flex flex-col items-center justify-center min-h-screen bg-gray-900 text-white">
+      <div className="bg-gray-800 p-8 rounded-xl shadow-lg w-96">
+        <h1 className="text-2xl font-bold mb-6 text-center">
+          {mode === "login" ? "Login" : "Sign Up"}
+        </h1>
 
-        {error && <p className="text-red-400 mb-4">{error}</p>}
+        {error && (
+          <div className="bg-red-500 text-white p-2 rounded mb-4">
+            {error}
+          </div>
+        )}
 
         <input
           type="email"
           placeholder="Email"
+          className="w-full p-2 mb-4 rounded bg-gray-700 text-white"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
-          className="w-full p-2 mb-3 rounded bg-gray-700 text-white"
         />
+
         <input
           type="password"
           placeholder="Password"
+          className="w-full p-2 mb-4 rounded bg-gray-700 text-white"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          className="w-full p-2 mb-6 rounded bg-gray-700 text-white"
         />
 
-        <div className="flex justify-between">
+        {mode === "login" ? (
           <button
-            onClick={handleSignup}
-            className="px-4 py-2 bg-green-600 rounded hover:bg-green-500"
+            onClick={handleLoginClick}
+            className="w-full bg-blue-600 hover:bg-blue-700 py-2 rounded font-semibold"
+          >
+            Login
+          </button>
+        ) : (
+          <button
+            onClick={handleSignupClick}
+            className="w-full bg-green-600 hover:bg-green-700 py-2 rounded font-semibold"
           >
             Sign Up
           </button>
-          <button
-            onClick={handleLogin}
-            className="px-4 py-2 bg-blue-600 rounded hover:bg-blue-500"
-          >
-            Log In
-          </button>
-        </div>
+        )}
+
+        <p className="mt-4 text-center text-gray-400">
+          {mode === "login" ? (
+            <>
+              Don’t have an account?{" "}
+              <button
+                onClick={() => setMode("signup")}
+                className="text-blue-400 hover:underline"
+              >
+                Sign Up
+              </button>
+            </>
+          ) : (
+            <>
+              Already have an account?{" "}
+              <button
+                onClick={() => setMode("login")}
+                className="text-blue-400 hover:underline"
+              >
+                Login
+              </button>
+            </>
+          )}
+        </p>
       </div>
     </div>
   );
-}
+};
+
+export default LoginPage;

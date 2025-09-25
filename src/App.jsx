@@ -1,11 +1,27 @@
 import React, { useState, useMemo, useEffect } from "react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea } from "recharts";
-import { registerUser, loginUser, logoutUser } from "./authService"; // ✅ using helper functions only
 import LoginPage from "./LoginPage";
-import {collection, addDoc, updateDoc, deleteDoc, query, orderBy } from "firebase/firestore";
-import { auth, db } from "./firebase"; // ✅ no getAuth(app) inside App.jsx anymore
-import { onAuthStateChanged, signInWithCustomToken, signInAnonymously } from "firebase/auth";
-import { doc, setDoc, getDoc, onSnapshot,getFirestore, serverTimestamp } from "firebase/firestore";
+import { supabase } from "./supabaseClient";
+
+// Sign up
+export async function registerUser(email, password) {
+  const { data, error } = await supabase.auth.signUp({ email, password });
+  if (error) throw error;
+  return data.user;
+}
+
+// Login
+export async function loginUser(email, password) {
+  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+  if (error) throw error;
+  return data.user;
+}
+
+// Logout
+export async function logoutUser() {
+  const { error } = await supabase.auth.signOut();
+  if (error) throw error;
+}
 
 
 
@@ -164,26 +180,42 @@ const AuthPage = ({ onLogin }) => {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
 
-  const handleLoginClick = async () => {
-    try {
-      // using the authService helper
-      const user = await loginUser(email.trim(), password);
-      if (user) onLogin(user.uid);
-    } catch (err) {
-      console.error("Login failed:", err);
-      setError(err.message || "Login error");
-    }
-  };
+// 🔹 LOGIN
+const handleLoginClick = async () => {
+  try {
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: email.trim(),
+      password,
+    });
 
-  const handleSignupClick = async () => {
-    try {
-      const user = await registerUser(email.trim(), password);
-      if (user) onLogin(user.uid);
-    } catch (err) {
-      console.error("Signup failed:", err);
-      setError(err.message || "Signup error");
+    if (error) throw error;
+
+    if (data.user) {
+      onLogin(data.user.id); // Supabase UUID
     }
-  };
+  } catch (err) {
+    console.error("Login failed:", err);
+    setError(err.message || "Login error");
+  }
+};
+
+ const handleSignupClick = async () => {
+  try {
+    const { data, error } = await supabase.auth.signUp({
+      email: email.trim(),
+      password,
+    });
+
+    if (error) throw error;
+
+    if (data.user) {
+      onLogin(data.user.id); // Supabase UUID
+    }
+  } catch (err) {
+    console.error("Signup failed:", err);
+    setError(err.message || "Signup error");
+  }
+};
 
   return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-gray-900 text-white">
@@ -262,11 +294,15 @@ export default function App() {
     }
   };
 
- const handleLogout = async () => {
-    await logoutUser();
+// 🔹 LOGOUT
+const handleLogout = async () => {
+  const { error } = await supabase.auth.signOut();
+  if (error) {
+    console.error("Logout failed:", error);
+  } else {
     setUserId(null);
-  };
-
+  }
+};
 
   
     // Open the daily details modal for a given date (ISO 'YYYY-MM-DD')
@@ -305,59 +341,83 @@ const closeDailyDetails = () => {
 
 
 useEffect(() => {
-  const unsubscribe = onAuthStateChanged(auth, async (user) => {
-    try {
-      if (user) {
-        setUserId(user.uid);
-        // ensure user doc exists (merge so you don't overwrite)
-        await setDoc(doc(db, "users", user.uid), { lastSeen: serverTimestamp() }, { merge: true });
+  const { data: subscription } = supabase.auth.onAuthStateChange(
+    async (event, session) => {
+      if (session?.user) {
+        setUserId(session.user.id);
+
+        // Upsert user record
+        const { error } = await supabase
+          .from("users")
+          .upsert({ id: session.user.id, last_seen: new Date() });
+
+        if (error) console.error("Error upserting user:", error);
       } else {
-        if (initialAuthToken) {
-          await signInWithCustomToken(auth, initialAuthToken).catch(console.error);
-        } else {
-          await signInAnonymously(auth).catch(console.error);
-        }
+        setUserId(null);
       }
-    } catch (e) {
-      console.error(e);
-    } finally {
       setLoading(false);
-    }
-  });
-
-  return () => unsubscribe();
-}, [initialAuthToken]);
-
-
-
-const tradesCollectionRef = userId
-  ? collection(db, "users", userId, "tradingJournal", JOURNAL_ID, "trades")
-  : null;
-
-
-// --- Real-time Data Listener with onSnapshot ---
-useEffect(() => {
-  if (!tradesCollectionRef) return;
-
-  const q = query(tradesCollectionRef, orderBy("createdAt", "desc"));
-
-  const unsubscribe = onSnapshot(
-    q,
-    (snapshot) => {
-      const allTrades = snapshot.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
-      }));
-      setTradesOpen(allTrades.filter((t) => t.status === "open"));
-      setTradesHistory(allTrades.filter((t) => t.status !== "open"));
-    },
-    (error) => {
-      console.error("Error listening to trades:", error);
     }
   );
 
-  return () => unsubscribe();
-}, [tradesCollectionRef]);
+  return () => subscription.subscription.unsubscribe();
+}, []);
+
+
+const loadTrades = async () => {
+ const { data, error } = await supabase
+  .from("trades")
+  .select("*")
+  .eq("user_id", userId)  // now a UUID
+  .order("created_at", { ascending: false });
+  if (error) console.error(error);
+  else setTrades(data);
+};
+
+
+
+
+// --- Real-time Data Listener with onSnapshot ---
+// ✅ New Supabase code
+useEffect(() => {
+  // check if a user is already signed in
+// 🔹 GET USER
+const getUser = async () => {
+  const { data: { user }, error } = await supabase.auth.getUser();
+
+  if (error) {
+    console.error("GetUser error:", error);
+    return;
+  }
+
+  if (user) {
+    setUserId(user.id); // Supabase UUID
+  } else {
+    // ⚠️ Supabase doesn’t have anonymous login enabled by default
+    // Remove this block if you don’t enable anon sign-in in your project
+    const { data, error: anonError } = await supabase.auth.signInAnonymously();
+    if (anonError) {
+      console.error("Anon login error:", anonError);
+    } else if (data?.user) {
+      setUserId(data.user.id);
+    }
+  }
+};
+  getUser();
+
+  // subscribe to future auth state changes
+  const { data: subscription } = supabase.auth.onAuthStateChange((_event, session) => {
+    if (session?.user) {
+      setUserId(session.user.id);
+    } else {
+      setUserId(null);
+    }
+  });
+
+  return () => {
+    subscription.subscription.unsubscribe();
+  };
+}, []);
+
 
 
     // --- State Management ---
@@ -590,34 +650,33 @@ const handleSaveTrade = async (e) => {
     ? String(formData.beforeImage).trim()
     : null;
 
-  // ✅ Build trade object (without id yet)
-   const trade = {
-    accountType: formData.accountType,
-    pair: formData.pair,
-    type: formData.type,
-    entryDate: formData.entryDate,
-    entryPrice: parseNumber(formData.price),
-    sl: parseNumber(formData.sl),
-    tp: parseNumber(formData.tp),
-    risk: parseNumber(formData.risk),
-    lotSize: Number(calculateLotSize_live(formData).toFixed(4)),
-    valuePerPip: getAdjustedVP(formData.pair, formData.accountType),
-    status: "open",
-    ratio,
-    beforeImage: before,
-    createdAt: serverTimestamp(),
-    session,
-  };
+  // ✅ Build trade object (no Firestore serverTimestamp, use JS Date instead)
+ const trade = {
+  account_type: formData.accountType,
+  pair: formData.pair,
+  type: formData.type,
+  entry_date: formData.entryDate,
+  entry_price: parseNumber(formData.price),
+  sl: parseNumber(formData.sl),
+  tp: parseNumber(formData.tp),
+  risk: parseNumber(formData.risk),
+  lot_size: Number(calculateLotSize_live(formData).toFixed(4)),
+  value_per_pip: getAdjustedVP(formData.pair, formData.accountType),
+  status: "open",
+  ratio,
+  before_image: before,
+  created_at: new Date().toISOString(), // OR let DB default to now()
+  session,
+  user_id: userId,
+};
 
-try {
-    if (!tradesCollectionRef) return;
-    await addDoc(tradesCollectionRef, trade);
-    console.log("Trade saved to Firestore");
-    // ❌ don’t touch setTradesOpen here
-  } catch (err) {
-    console.error("Error saving trade:", err);
+
+  const { error } = await supabase.from("trades").insert([trade]);
+  if (error) {
+    console.error("Error saving trade:", error);
     setErrorMessage("Failed to save trade.");
     setShowErrorModal(true);
+    return;
   }
 
   // Reset form
@@ -685,50 +744,53 @@ const handleSaveClose = async () => {
   const mult = getMultiplier(trade.pair);
   const pointsSigned =
     trade.type === "long"
-      ? Math.round((exitPriceNum - trade.entryPrice) * mult)
-      : Math.round((trade.entryPrice - exitPriceNum) * mult);
+      ? Math.round((exitPriceNum - trade.entry_price) * mult)
+      : Math.round((trade.entry_price - exitPriceNum) * mult);
 
   const pnlPercent = capital ? (actualPnLNum / capital) * 100 : 0;
 
-  const before = trade.beforeImage && isValidUrl(trade.beforeImage)
-    ? String(trade.beforeImage).trim()
-    : null;
+  const before =
+    trade.before_image && isValidUrl(trade.before_image)
+      ? String(trade.before_image).trim()
+      : null;
 
-  const after = modalAfterImage && isValidUrl(modalAfterImage)
-    ? String(modalAfterImage).trim()
-    : null;
+  const after =
+    modalAfterImage && isValidUrl(modalAfterImage)
+      ? String(modalAfterImage).trim()
+      : null;
 
-  // ✅ Build closed trade object
+  // ✅ Build closed trade object (snake_case for Supabase)
   const closed = {
-    ...trade,
-    exitDate,
-    exitPrice: exitPriceNum,
+    exit_date: exitDate,
+    exit_price: exitPriceNum,
     points: pointsSigned,
-    pnlPercent,
-    pnlCurrency: actualPnLNum,
-    status: "closed",              // force closed
-    stopLoss: trade.sl,
-    takeProfit: trade.tp,
-    beforeImage: before,
-    afterImage: after,
-    closedAt: serverTimestamp(),   // Firestore timestamp
+    pnl_percent: pnlPercent,
+    pnl_currency: actualPnLNum,
+    status: "closed", // force closed
+    stop_loss: trade.sl,
+    take_profit: trade.tp,
+    before_image: before,
+    after_image: after,
+    closed_at: new Date().toISOString(), // Supabase timestamp
   };
 
   try {
     if (userId && trade.id) {
-      const tradeRef = doc(
-        db,
-        "users",
-        userId,
-        "tradingJournal",
-        JOURNAL_ID,
-        "trades",
-        trade.id
-      );
-      await updateDoc(tradeRef, closed);
-      console.log("Trade closed in Firestore");
+      const { error } = await supabase
+        .from("trades")
+        .update(closed)
+        .eq("id", trade.id)
+        .eq("user_id", userId);
+
+      if (error) {
+        console.error("Error closing trade:", error);
+        setErrorMessage("Failed to close trade.");
+        setShowErrorModal(true);
+      } else {
+        console.log("✅ Trade closed in Supabase");
+      }
     } else {
-      console.warn("Missing userId or trade.id, skipping Firestore update");
+      console.warn("⚠ Missing userId or trade.id, skipping Supabase update");
     }
   } catch (e) {
     console.error("Error updating trade:", e);
@@ -775,36 +837,41 @@ const handleSaveEditedTrade = async () => {
       ? Number(((pnlCurrency / capital) * 100).toFixed(2))
       : 0;
 
+    // ✅ Build updated trade object with snake_case fields
     const updatedTrade = {
-      ...editingTrade,
-      exitPrice: exitPriceNum,
-      exitDate: editingTrade.exitDate,
+      exit_price: exitPriceNum,
+      exit_date: editingTrade.exitDate,
       points,
-      pnlCurrency,
-      pnlPercent,
-       session: editingTrade.session || null, // ✅ preserve session
+      pnl_currency: pnlCurrency,
+      pnl_percent: pnlPercent,
+      session: editingTrade.session || null,
     };
 
-    // ✅ Update local state
+    // ✅ Update local state (camelCase stays in React state)
     setTradesHistory((prev) =>
-      prev.map((t) => (t.id === updatedTrade.id ? updatedTrade : t))
+      prev.map((t) =>
+        t.id === editingTrade.id ? { ...t, ...updatedTrade } : t
+      )
     );
     setTradesOpen((prev) =>
-      prev.map((t) => (t.id === updatedTrade.id ? updatedTrade : t))
+      prev.map((t) =>
+        t.id === editingTrade.id ? { ...t, ...updatedTrade } : t
+      )
     );
 
-    // ✅ Update in Firestore (subcollection doc, not whole journal)
-const tradeRef = doc(
-  db,
-  "users",
-  userId,
-  "tradingJournal",
-  JOURNAL_ID,
-  "trades",
-  updatedTrade.id
-);
-await updateDoc(tradeRef, updatedTrade);
+    // ✅ Update in Supabase
+    const { error } = await supabase
+      .from("trades")
+      .update(updatedTrade)
+      .eq("id", editingTrade.id)
+      .eq("user_id", userId);
 
+    if (error) {
+      console.error("Error saving edited trade:", error);
+      setErrorMessage("Failed to update trade.");
+      setShowErrorModal(true);
+      return;
+    }
 
     // ✅ Close modal after save
     setIsEditModalOpen(false);
@@ -817,6 +884,8 @@ await updateDoc(tradeRef, updatedTrade);
 };
 
 
+
+
 // ✅ Open the edit modal for a trade
 const handleEditTrade = (trade) => {
   console.log("Editing trade:", trade); // debug
@@ -826,30 +895,32 @@ const handleEditTrade = (trade) => {
 
 // ✅ Delete a trade from history
 const handleDeleteTrade = async (tradeId) => {
-  console.log("Deleting trade:", tradeId); // debug
+  console.log("Deleting trade:", tradeId);
+
   try {
     // ✅ Update local state first (optimistic update)
     setTradesHistory((prev) => prev.filter((t) => t.id !== tradeId));
     setTradesOpen((prev) => prev.filter((t) => t.id !== tradeId));
 
-    // ✅ Delete specific trade document in Firestore
-const tradeRef = doc(
-  db,
-  "users",
-  userId,
-  "tradingJournal",
-  JOURNAL_ID,
-  "trades",
-  tradeId
-);
-await deleteDoc(tradeRef);
+    // ✅ Delete specific trade row in Supabase
+    const { error } = await supabase
+      .from("trades")
+      .delete()
+      .eq("id", tradeId)
+      .eq("user_id", userId);
 
+    if (error) {
+      console.error("Error deleting trade:", error);
+      setErrorMessage("Failed to delete trade.");
+      setShowErrorModal(true);
+      return;
+    }
 
     // ✅ Close edit modal if open
     setIsEditModalOpen(false);
     setEditingTrade(null);
 
-    console.log("Trade successfully deleted:", tradeId);
+    console.log("✅ Trade successfully deleted:", tradeId);
   } catch (err) {
     console.error("Error deleting trade:", err);
     setErrorMessage("Failed to delete trade.");
