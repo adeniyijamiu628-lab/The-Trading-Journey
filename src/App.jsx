@@ -65,6 +65,37 @@ const Modal = ({ isOpen, title, onClose, children }) => {
   );
 };
 
+// Normalizes a row returned from Supabase (snake_case) to the camelCase shape UI expects.
+const normalizeTradeRow = (r) => {
+  if (!r) return null;
+  return {
+    id: r.id,
+    userId: r.user_id,
+    accountType: r.account_type ?? r.accountType ?? "Standard",
+    pair: r.pair,
+    type: r.type,
+    entryDate: r.entry_date ?? r.entryDate ?? (r.created_at ? new Date(r.created_at).toISOString().slice(0,10) : ""),
+    entryPrice: Number(r.entry_price ?? r.entryPrice ?? 0),
+    sl: Number(r.sl ?? 0),
+    tp: Number(r.tp ?? 0),
+    risk: Number(r.risk ?? 0),
+    lotSize: Number(r.lot_size ?? r.lotSize ?? 0),
+    valuePerPip: Number(r.value_per_pip ?? r.valuePerPip ?? 0),
+    status: r.status,
+    ratio: Number(r.ratio ?? 0),
+    beforeImage: r.before_image ?? r.beforeImage ?? null,
+    afterImage: r.after_image ?? r.afterImage ?? null,
+    createdAt: r.created_at ?? r.createdAt ?? null,
+    exitDate: r.exit_date ?? r.exitDate ?? null,
+    exitPrice: Number(r.exit_price ?? r.exitPrice ?? 0),
+    points: r.points ?? null,
+    pnlCurrency: Number(r.pnl_currency ?? r.pnlCurrency ?? 0),
+    pnlPercent: Number(r.pnl_percent ?? r.pnlPercent ?? 0),
+    closedAt: r.closed_at ?? r.closedAt ?? null,
+    session: r.session ?? null,
+  };
+};
+
 // Helper function to get the week number of a date
 const getWeekNumber = (d) => {
   const date = new Date(d);
@@ -341,37 +372,86 @@ const closeDailyDetails = () => {
 
 
 useEffect(() => {
-  const { data: subscription } = supabase.auth.onAuthStateChange(
-    async (event, session) => {
-      if (session?.user) {
-        setUserId(session.user.id);
-
-        // Upsert user record
-        const { error } = await supabase
+  // Initialize current user
+  (async () => {
+    try {
+      const { data: { user }, error } = await supabase.auth.getUser();
+      if (error) {
+        console.error("getUser error:", error);
+      } else if (user) {
+        setUserId(user.id);
+        // optional: upsert user record
+        const { error: upErr } = await supabase
           .from("users")
-          .upsert({ id: session.user.id, last_seen: new Date() });
-
-        if (error) console.error("Error upserting user:", error);
-      } else {
-        setUserId(null);
+          .upsert({ id: user.id, last_seen: new Date() });
+        if (upErr) console.error("Upsert user error:", upErr);
       }
+    } catch (e) {
+      console.error("getUser exception:", e);
+    } finally {
       setLoading(false);
     }
-  );
+  })();
 
-  return () => subscription.subscription.unsubscribe();
+  // subscribe to auth changes
+  const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    if (session?.user) {
+      setUserId(session.user.id);
+    } else {
+      setUserId(null);
+    }
+    setLoading(false);
+  });
+
+  return () => {
+    try { subscription?.unsubscribe?.(); } catch (e) { /* ignore */ }
+  };
 }, []);
 
 
+
 const loadTrades = async () => {
- const { data, error } = await supabase
-  .from("trades")
-  .select("*")
-  .eq("user_id", userId)  // now a UUID
-  .order("created_at", { ascending: false });
-  if (error) console.error(error);
-  else setTrades(data);
+  if (!userId) {
+    setTradesOpen([]);
+    setTradesHistory([]);
+    return;
+  }
+
+  const { data, error } = await supabase
+    .from("trades")
+    .select("*")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    console.error("loadTrades error:", error);
+    return;
+  }
+
+  const normalized = (data || []).map(normalizeTradeRow);
+  setTradesOpen(normalized.filter(t => t.status === "open" || t.status === "active"));
+  setTradesHistory(normalized.filter(t => t.status === "closed"));
 };
+
+useEffect(() => {
+  if (!userId) return;
+
+  const channel = supabase
+    .channel("trades-realtime")
+    .on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "trades", filter: `user_id=eq.${userId}` },
+      (payload) => {
+        console.log("Realtime change:", payload);
+        loadTrades(); // simply refetch trades after any insert/update/delete
+      }
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}, [userId]);
 
 
 
@@ -379,42 +459,58 @@ const loadTrades = async () => {
 // --- Real-time Data Listener with onSnapshot ---
 // ✅ New Supabase code
 useEffect(() => {
-  // check if a user is already signed in
-// 🔹 GET USER
-const getUser = async () => {
-  const { data: { user }, error } = await supabase.auth.getUser();
-
-  if (error) {
-    console.error("GetUser error:", error);
-    return;
-  }
-
-  if (user) {
-    setUserId(user.id); // Supabase UUID
-  } else {
-    // ⚠️ Supabase doesn’t have anonymous login enabled by default
-    // Remove this block if you don’t enable anon sign-in in your project
-    const { data, error: anonError } = await supabase.auth.signInAnonymously();
-    if (anonError) {
-      console.error("Anon login error:", anonError);
-    } else if (data?.user) {
-      setUserId(data.user.id);
+  // Initialize current user
+  (async () => {
+    try {
+      const { data: { user }, error } = await supabase.auth.getUser();
+      if (error) {
+        console.error("getUser error:", error);
+      } else if (user) {
+        setUserId(user.id);
+        // ✅ Upsert user record (with email + last_seen)
+        const { error: upErr } = await supabase
+          .from("users")
+          .upsert({
+            id: user.id,
+            email: user.email,
+            last_seen: new Date(),
+          });
+        if (upErr) console.error("Upsert user error:", upErr);
+      }
+    } catch (e) {
+      console.error("getUser exception:", e);
+    } finally {
+      setLoading(false);
     }
-  }
-};
-  getUser();
+  })();
 
-  // subscribe to future auth state changes
-  const { data: subscription } = supabase.auth.onAuthStateChange((_event, session) => {
-    if (session?.user) {
-      setUserId(session.user.id);
-    } else {
-      setUserId(null);
+  // Subscribe to auth changes
+  const { data: { subscription } } = supabase.auth.onAuthStateChange(
+    async (_event, session) => {
+      if (session?.user) {
+        setUserId(session.user.id);
+        // ✅ Keep user row updated on auth changes
+        const { error: upErr } = await supabase
+          .from("users")
+          .upsert({
+            id: session.user.id,
+            email: session.user.email,
+            last_seen: new Date(),
+          });
+        if (upErr) console.error("Upsert user error:", upErr);
+      } else {
+        setUserId(null);
+      }
+      setLoading(false);
     }
-  });
+  );
 
   return () => {
-    subscription.subscription.unsubscribe();
+    try {
+      subscription?.unsubscribe?.();
+    } catch (e) {
+      /* ignore */
+    }
   };
 }, []);
 
@@ -577,8 +673,7 @@ useEffect(() => {
         setFormData((prev) => ({ ...prev, [name]: value }));
     };
 
-
-const handleSaveTrade = async (e) => {
+  const handleSaveTrade = async (e) => {
   e?.preventDefault?.();
 
   const currentDateSummary = summaryForSelectedDate;
@@ -587,7 +682,7 @@ const handleSaveTrade = async (e) => {
   // ✅ Daily trade limits check (date-based)
   const tradesForDate = [
     ...tradesOpen.filter(t => t.entryDate === formData.entryDate),
-    ...tradesHistory.filter(t => t.entryDate === formData.entryDate)
+    ...tradesHistory.filter(t => t.entryDate === formData.entryDate),
   ];
 
   const activeCount = tradesForDate.filter(t => t.status === "open" || t.status === "active").length;
@@ -650,46 +745,65 @@ const handleSaveTrade = async (e) => {
     ? String(formData.beforeImage).trim()
     : null;
 
-  // ✅ Build trade object (no Firestore serverTimestamp, use JS Date instead)
- const trade = {
-  account_type: formData.accountType,
-  pair: formData.pair,
-  type: formData.type,
-  entry_date: formData.entryDate,
-  entry_price: parseNumber(formData.price),
-  sl: parseNumber(formData.sl),
-  tp: parseNumber(formData.tp),
-  risk: parseNumber(formData.risk),
-  lot_size: Number(calculateLotSize_live(formData).toFixed(4)),
-  value_per_pip: getAdjustedVP(formData.pair, formData.accountType),
-  status: "open",
-  ratio,
-  before_image: before,
-  created_at: new Date().toISOString(), // OR let DB default to now()
-  session,
-  user_id: userId,
-};
+  // ✅ Build trade object (snake_case for DB)
+  const trade = {
+    account_type: formData.accountType,
+    pair: formData.pair,
+    type: formData.type,
+    entry_date: formData.entryDate,
+    entry_price: parseNumber(formData.price),
+    sl: parseNumber(formData.sl),
+    tp: parseNumber(formData.tp),
+    risk: parseNumber(formData.risk),
+    lot_size: Number(lot.toFixed(4)),
+    value_per_pip: vpAtSave,
+    status: "open",
+    ratio,
+    before_image: before,
+    created_at: new Date().toISOString(), // you can drop this if DB has default now()
+    session,
+    user_id: userId,
+  };
 
+  try {
+    // Insert & return row
+    const { data, error } = await supabase
+      .from("trades")
+      .insert([trade])
+      .select()
+      .single();
 
-  const { error } = await supabase.from("trades").insert([trade]);
-  if (error) {
-    console.error("Error saving trade:", error);
+    if (error) {
+      console.error("Error saving trade:", error);
+      setErrorMessage("Failed to save trade.");
+      setShowErrorModal(true);
+      return;
+    }
+
+    const normalized = normalizeTradeRow(data);
+
+    // Add to open trades list immediately
+    setTradesOpen(prev => [normalized, ...prev]);
+
+    // Reset form
+    setFormData({
+      accountType: "Mini",
+      pair: "",
+      type: "long",
+      entryDate: new Date().toISOString().slice(0, 10),
+      price: "",
+      sl: "",
+      tp: "",
+      risk: "2.0",
+      beforeImage: null,
+    });
+  } catch (err) {
+    console.error("Insert exception:", err);
     setErrorMessage("Failed to save trade.");
     setShowErrorModal(true);
-    return;
   }
-
-  // Reset form
-  setFormData({
-    pair: "",
-    type: "long",
-    price: "",
-    sl: "",
-    tp: "",
-    risk: "2.0",
-    beforeImage: "",
-  });
 };
+
 
 
 
@@ -704,29 +818,18 @@ const handleSaveTrade = async (e) => {
         setModalOpen(true);
     };
 
-    const computeExpectedCurrencyForClose = (trade, exitPrice) => {
+const computeExpectedCurrencyForClose = (trade, exitPrice) => {
   if (!trade || exitPrice === "" || exitPrice === null || exitPrice === undefined) return 0;
   const exit = parseNumber(exitPrice);
-  // support backwards compatibility: use entryPrice, fall back to price
-  const entry = parseNumber(trade.entryPrice ?? trade.price ?? 0);
+  const entry = parseNumber(trade.entryPrice ?? trade.entry_price ?? trade.price ?? 0);
   const mult = getMultiplier(trade.pair);
   const pointsSigned = trade.type === "long" ? (exit - entry) * mult : (entry - exit) * mult;
-  const lot = Number(trade.lotSize) || 0;
-  const vpp = Number(trade.valuePerPip) || 0;
+  const lot = Number(trade.lotSize ?? trade.lot_size) || 0;
+  const vpp = Number(trade.valuePerPip ?? trade.value_per_pip) || 0;
   const expectedCurrency = lot * vpp * pointsSigned;
-  return Number(expectedCurrency);
-        const sl = parseNumber(formData.sl);
-        const tp = parseNumber(formData.tp);
-        let ratio = null;
-        if (entry && sl && tp) {
-            if (formData.type === "long") {
-                ratio = (tp - entry) / (entry - sl);
-            } else {
-                ratio = (entry - tp) / (sl - entry);
-            }
-            ratio = Number(ratio.toFixed(2));
-        }
-    };
+  return Number(expectedCurrency.toFixed(2));
+};
+
 
 
 const handleSaveClose = async () => {
@@ -744,14 +847,14 @@ const handleSaveClose = async () => {
   const mult = getMultiplier(trade.pair);
   const pointsSigned =
     trade.type === "long"
-      ? Math.round((exitPriceNum - trade.entry_price) * mult)
-      : Math.round((trade.entry_price - exitPriceNum) * mult);
+      ? Math.round((exitPriceNum - trade.entryPrice) * mult)
+      : Math.round((trade.entryPrice - exitPriceNum) * mult);
 
   const pnlPercent = capital ? (actualPnLNum / capital) * 100 : 0;
 
   const before =
-    trade.before_image && isValidUrl(trade.before_image)
-      ? String(trade.before_image).trim()
+    trade.beforeImage && isValidUrl(trade.beforeImage)
+      ? String(trade.beforeImage).trim()
       : null;
 
   const after =
@@ -766,28 +869,32 @@ const handleSaveClose = async () => {
     points: pointsSigned,
     pnl_percent: pnlPercent,
     pnl_currency: actualPnLNum,
-    status: "closed", // force closed
-    stop_loss: trade.sl,
-    take_profit: trade.tp,
+    status: "closed",
     before_image: before,
     after_image: after,
-    closed_at: new Date().toISOString(), // Supabase timestamp
+    closed_at: new Date().toISOString(),
   };
 
   try {
     if (userId && trade.id) {
-      const { error } = await supabase
+      // Update in DB and return updated row
+      const { data, error } = await supabase
         .from("trades")
         .update(closed)
         .eq("id", trade.id)
-        .eq("user_id", userId);
+        .eq("user_id", userId)
+        .select()
+        .single();
 
       if (error) {
         console.error("Error closing trade:", error);
         setErrorMessage("Failed to close trade.");
         setShowErrorModal(true);
-      } else {
-        console.log("✅ Trade closed in Supabase");
+      } else if (data) {
+        const normalized = normalizeTradeRow(data);
+        // ✅ Move from open → history in UI
+        setTradesOpen((prev) => prev.filter((t) => t.id !== trade.id));
+        setTradesHistory((prev) => [normalized, ...prev]);
       }
     } else {
       console.warn("⚠ Missing userId or trade.id, skipping Supabase update");
@@ -1530,7 +1637,7 @@ const dailyBreakdown = useMemo(() => {
       </thead>
       <tbody>
         {tradesHistory.length > 0 ? (
-          tradesHistory.sort((a, b) => b.id.split("-")[0] - a.id.split("-")[0]).map((trade) => (
+          [...tradesHistory].sort((a, b) => new Date(b.exitDate ?? b.createdAt) - new Date(a.exitDate ?? a.createdAt)).map((trade) => (
               <tr
                 key={trade.id}
                 className="border-t border-gray-700 text-gray-300"
@@ -2320,11 +2427,6 @@ const weeklyRiskData = [...weekData.trades]
                 return null;
         }
     };
-// ✅ App return
-if (!userId) {
-  // 🔑 If no user → show login/signup screen
-  return <LoginPage onLogin={setUserId} />;
-}
 
  return (
     <div
