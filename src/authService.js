@@ -1,7 +1,7 @@
 // src/authService.js
 import { supabase } from "./supabaseClient";
 
-// --- Sign Up ---
+// --- Sign Up (Email/Password) ---
 export const signUp = async (email, password) => {
   try {
     const { data, error } = await supabase.auth.signUp({
@@ -15,7 +15,7 @@ export const signUp = async (email, password) => {
   }
 };
 
-// --- Sign In ---
+// --- Sign In (Email/Password) ---
 export const signIn = async (email, password) => {
   try {
     const { data, error } = await supabase.auth.signInWithPassword({
@@ -40,6 +40,22 @@ export const signOut = async () => {
   }
 };
 
+// --- Sign In with Google (OAuth) ---
+export const signInWithGoogle = async () => {
+  try {
+    const { data, error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: {
+        redirectTo: window.location.origin, // Redirect back to your app after login
+      },
+    });
+    return { data, error };
+  } catch (err) {
+    console.error("Google SignIn error:", err);
+    return { data: null, error: err };
+  }
+};
+
 // --- Get Current Session ---
 export const getCurrentSession = async () => {
   try {
@@ -53,13 +69,9 @@ export const getCurrentSession = async () => {
 
 // --- Listen to Auth State Changes ---
 export const onAuthStateChange = (callback) => {
-  const { data, error } = supabase.auth.onAuthStateChange((_event, session) => {
+  const { data } = supabase.auth.onAuthStateChange((_event, session) => {
     callback(session?.user ?? null);
   });
 
-  if (error) {
-    console.error("Auth state change error:", error);
-  }
-
-  return data.subscription; // ✅ return subscription directly
+  return data.subscription; // ✅ subscription object
 };

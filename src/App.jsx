@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect } from "react";
 import { LineChart,Line,XAxis,YAxis,Tooltip,CartesianGrid,ResponsiveContainer,ReferenceLine,BarChart,Bar,Cell} from "recharts";
-import { signUp, signIn, signOut, getCurrentSession, onAuthStateChange } from "./authService";
+import { signIn, signUp, signOut, signInWithGoogle, onAuthStateChange, getCurrentSession } from "./authService";
 import UserSettingsForm from "./UserSettingsForm";
 import AuthPage from "./AuthPage";
 import { supabase } from "./supabaseClient";
@@ -178,13 +178,13 @@ export default function App() {
     const [selectedDayTrades, setSelectedDayTrades] = useState([]);
     const [depositAmount, setDepositAmount] = useState("");
     const [withdrawAmount, setWithdrawAmount] = useState("");
+    const [user, setUser] = useState(null);
 
 // --- Lot Size Calculator states ---
 const [calcPair, setCalcPair] = useState("");
 const [calcPoints, setCalcPoints] = useState(0);
 const [calcRiskPercent, setCalcRiskPercent] = useState(2.0);
 const [calcAccountType, setCalcAccountType] = useState("Standard");
-const [user, setUser] = useState(null);
 const [email, setEmail] = useState("");
 const [password, setPassword] = useState("");
 const [settingsView, setSettingsView] = useState("menu"); 
@@ -285,43 +285,38 @@ const handleFundsWithdrawal = () => {
 
 
 // --- Supabase Authentication ---
-const handleSignup = async (email, password) => {
-  try {
-    const { data, error } = await supabase.auth.signUp({ email, password });
-    if (error) throw error;
-    if (data.user) {
-      setUserId(data.user.id);
-      setUser(data.user);
-      console.log("Signed up:", data.user.id);
-    }
-  } catch (err) {
-    console.error("Signup error:", err.message);
+// --- Handlers ---
+const handleEmailSignup = async () => {
+  const { data, error } = await signUp(email, password);
+  if (error) return console.error("Signup error:", error.message);
+  if (data?.user) {
+    setUser(data.user);
+    setUserId(data.user.id);
   }
 };
 
-const handleLogin = async (email, password) => {
-  try {
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) throw error;
-    if (data.user) {
-      setUserId(data.user.id);
-      setUser(data.user);
-      console.log("Logged in:", data.user.id);
-    }
-  } catch (err) {
-    console.error("Login error:", err.message);
+const handleEmailLogin = async () => {
+  const { data, error } = await signIn(email, password);
+  if (error) return console.error("Login error:", error.message);
+  if (data?.user) {
+    setUser(data.user);
+    setUserId(data.user.id);
   }
+};
+
+const handleGoogleLogin = async () => {
+  const { error } = await signInWithGoogle();
+  if (error) console.error("Google login error:", error.message);
 };
 
 const handleLogout = async () => {
-  try {
-    await supabase.auth.signOut();
-    setUserId(null);
-    setUser(null);
-  } catch (err) {
-    console.error("Logout error:", err.message);
-  }
+  const { error } = await signOut();
+  if (error) console.error("Logout error:", error.message);
+  setUser(null);
+  setUserId(null);
 };
+
+
 
 
 // Export
@@ -407,31 +402,20 @@ const closeDailyDetails = () => {
 };
 
 useEffect(() => {
-  // ✅ Check current session on load
-  const getSession = async () => {
-    const { data, error } = await supabase.auth.getSession();
-    if (error) {
-      console.error("Session error:", error.message);
-      setLoading(false);
-      return;
-    }
+  // ✅ Load current session on refresh
+  getCurrentSession().then(({ data }) => {
     if (data?.session?.user) {
       setUser(data.session.user);
       setUserId(data.session.user.id);
-    } else {
-      setUser(null);
-      setUserId(null);
     }
     setLoading(false);
-  };
+  });
 
-  getSession();
-
-  // ✅ Subscribe to auth state changes
-  const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-    if (session?.user) {
-      setUser(session.user);
-      setUserId(session.user.id);
+  // ✅ Subscribe to auth changes
+  const subscription = onAuthStateChange((authUser) => {
+    if (authUser) {
+      setUser(authUser);
+      setUserId(authUser.id);
     } else {
       setUser(null);
       setUserId(null);
@@ -439,10 +423,9 @@ useEffect(() => {
     setLoading(false);
   });
 
-  return () => {
-    listener.subscription.unsubscribe();
-  };
+  return () => subscription.unsubscribe();
 }, []);
+
 
 
 // Restore account state from localStorage
@@ -3545,20 +3528,25 @@ case "settings":
       </main>
     </div>
   );
-
-
-
-
             default:
                 return null;
         }
     };
 // ✅ App return
+if (loading) {
+  return (
+    <div className="flex items-center justify-center min-h-screen text-white">
+      Loading...
+    </div>
+  );
+}
+
 if (!userId) {
-  // 🔑 If no user → show login/signup screen
+  // 🔑 If no user → show AuthPage (email/password + Google login)
   return <AuthPage onLogin={setUserId} />;
 }
 
+// ✅ Main app after login
 return (
   <div
     className={`min-h-screen font-sans ${
@@ -3567,13 +3555,9 @@ return (
         : "bg-gray-100 text-gray-900"
     }`}
   >
-    {!userId ? (
-      // 🔑 Show login/signup page if no user
-      <AuthPage onLogin={setUserId} />
-      ) : !userSettings ? (
-  <UserSettingsForm onSave={setUserSettings} />
+    {!userSettings ? (
+      <UserSettingsForm onSave={setUserSettings} />
     ) : (
-      // ✅ Main app UI after login
       <>
         <header className="p-4 shadow-lg sticky top-0 z-10 backdrop-blur-md bg-opacity-70">
           <nav className={styles.navContainer}>
@@ -3624,11 +3608,20 @@ return (
 
         <main className="p-4">
           {renderContent()}
+
           {userId && (
-            <p className="mt-4 text-sm text-gray-400">
-              Logged in as:{" "}
-              <span className="font-semibold">{userId}</span>
-            </p>
+            <div className="mt-4 flex items-center justify-between text-sm text-gray-400">
+              <span>
+                Logged in as:{" "}
+                <span className="font-semibold">{user?.email}</span>
+              </span>
+              <button
+                onClick={handleLogout}
+                className="px-3 py-1 bg-gray-700 rounded hover:bg-gray-800 text-white"
+              >
+                Logout
+              </button>
+            </div>
           )}
         </main>
       </>
