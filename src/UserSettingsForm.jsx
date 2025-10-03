@@ -1,8 +1,8 @@
 // src/components/UserSettingsForm.jsx
-import { useState, useEffect } from "react";
+import { useState } from "react";
+import { supabase } from "./supabaseClient"; // adjust path to your client
 
-function UserSettingsForm({ onSave, userId }) {
-  // State
+function UserSettingsForm({ userId, onAccountCreated }) {
   const [accountPlan, setAccountPlan] = useState("Normal");   // Normal | Target
   const [accountType, setAccountType] = useState("Standard"); // Standard | Mini | Micro
   const [accountName, setAccountName] = useState("");
@@ -14,72 +14,58 @@ function UserSettingsForm({ onSave, userId }) {
   const [depositEnabled, setDepositEnabled] = useState(false);
   const [withdrawalEnabled, setWithdrawalEnabled] = useState(false);
 
-  // Helper: per-user storage key
-  const userSettingsKey = (uid = userId || "local-guest") =>
-    `userSettings:${uid}`;
-
-  // ✅ Preload saved settings when component mounts / userId changes
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(userSettingsKey());
-      if (!raw) return;
-      const saved = JSON.parse(raw);
-
-      if (saved.accountPlan) setAccountPlan(saved.accountPlan);
-      if (saved.accountType) setAccountType(saved.accountType);
-      if (saved.accountName) setAccountName(saved.accountName);
-      if (saved.startingCapital !== undefined)
-        setStartingCapital(saved.startingCapital);
-      if (saved.drawdown !== undefined) setDrawdown(saved.drawdown);
-      if (saved.target !== undefined) setTarget(saved.target);
-      if (saved.duration !== undefined) setDuration(saved.duration);
-      if (saved.weeklyTarget !== undefined) setWeeklyTarget(saved.weeklyTarget);
-      if (saved.depositEnabled !== undefined)
-        setDepositEnabled(saved.depositEnabled);
-      if (saved.withdrawalEnabled !== undefined)
-        setWithdrawalEnabled(saved.withdrawalEnabled);
-    } catch (err) {
-      console.error("Failed to preload user settings:", err);
-    }
-  }, [userId]);
-
-  // Save handler
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
 
-    const settings = {
-      accountPlan,
-      accountType,
-      accountName,
-      startingCapital: startingCapital ? Number(startingCapital) : null,
+    const newAccount = {
+      user_id: userId,
+      account_name: accountName,
+      account_type: accountType,
+      account_plan: accountPlan,
+      capital: startingCapital ? Number(startingCapital) : 0,
       drawdown: drawdown ? Number(drawdown) : null,
-      depositEnabled,
-      withdrawalEnabled,
+      deposit_enabled: depositEnabled,
+      withdrawal_enabled: withdrawalEnabled,
     };
 
     if (accountPlan === "Target") {
-      settings.target = target ? Number(target) : null;
-      settings.duration = duration ? Number(duration) : null;
-      settings.weeklyTarget = weeklyTarget;
+      newAccount.target = target ? Number(target) : null;
+      newAccount.duration = duration ? Number(duration) : null;
+      newAccount.weekly_target = weeklyTarget;
     }
 
-    // ✅ Persist per-user
-    try {
-      localStorage.setItem(userSettingsKey(), JSON.stringify(settings));
-    } catch (err) {
-      console.error("Failed to save user settings:", err);
-    }
+    const { data, error } = await supabase
+      .from("accounts")
+      .insert([newAccount])
+      .select()
+      .single();
 
-    // Pass up to parent (App)
-    onSave(settings);
+    if (error) {
+      console.error("Failed to create account:", error);
+    } else {
+      console.log("Account created:", data);
+      onAccountCreated?.(data); // notify parent App that a new account is ready
+    }
   };
 
   return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-gray-900 text-white">
       <div className="bg-gray-800 p-6 rounded-2xl shadow-lg w-full max-w-lg">
-        <h2 className="text-2xl font-bold mb-6 text-center">User Settings</h2>
+        <h2 className="text-2xl font-bold mb-6 text-center">Create New Account</h2>
 
         <form onSubmit={handleSubmit} className="space-y-4">
+          {/* Account Name */}
+          <div>
+            <label className="block text-sm mb-1">Account Name</label>
+            <input
+              type="text"
+              value={accountName}
+              onChange={(e) => setAccountName(e.target.value)}
+              className="w-full p-2 rounded bg-gray-700 text-white"
+              required
+            />
+          </div>
+
           {/* Account Plan */}
           <div>
             <label className="block text-sm mb-1">Account Plan</label>
@@ -105,18 +91,6 @@ function UserSettingsForm({ onSave, userId }) {
               <option value="Mini">Mini</option>
               <option value="Micro">Micro</option>
             </select>
-          </div>
-
-          {/* Account Name */}
-          <div>
-            <label className="block text-sm mb-1">Account Name</label>
-            <input
-              type="text"
-              value={accountName}
-              onChange={(e) => setAccountName(e.target.value)}
-              className="w-full p-2 rounded bg-gray-700 text-white"
-              required
-            />
           </div>
 
           {/* Starting Capital */}
@@ -211,7 +185,7 @@ function UserSettingsForm({ onSave, userId }) {
             type="submit"
             className="w-full px-4 py-2 bg-green-600 hover:bg-green-700 rounded"
           >
-            Save Settings
+            Create Account
           </button>
         </form>
       </div>

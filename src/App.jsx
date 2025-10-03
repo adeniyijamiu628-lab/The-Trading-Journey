@@ -85,6 +85,44 @@ const handleCapitalUpdate = (newCapital) => {
   persistAccountState(); // this pushes to Supabase + localStorage
 };
 
+// Nigeria time (UTC+1) forex sessions
+const getSessionForTime = (timeStr) => {
+  if (!timeStr) return "";
+
+  const [hours, minutes] = timeStr.split(":").map(Number);
+  const totalMinutes = hours * 60 + minutes;
+
+  // Helper to check if time falls within a range
+  const inRange = (time, start, end) => {
+    if (start <= end) {
+      return time >= start && time < end;
+    } else {
+      // handle ranges that pass midnight
+      return time >= start || time < end;
+    }
+  };
+
+  // Define session ranges (in minutes, Nigeria time)
+  const sessions = [
+    { name: "Sydney & Tokyo", start: 0, end: 480 },     // 12:00am - 8:00am
+    { name: "Tokyo", start: 480, end: 540 },            // 8:00am - 9:00am
+    { name: "Tokyo & London", start: 480, end: 540 },   // overlap 8:00am - 9:00am
+    { name: "London", start: 480, end: 840 },           // 8:00am - 2:00pm
+    { name: "London & New York", start: 840, end: 1020 }, // 2:00pm - 5:00pm
+    { name: "New York", start: 840, end: 1380 },        // 2:00pm - 11:00pm
+    { name: "Sydney", start: 1380, end: 1440 },         // 11:00pm - midnight
+  ];
+
+  for (const s of sessions) {
+    if (inRange(totalMinutes, s.start, s.end)) {
+      return s.name;
+    }
+  }
+
+  return "Unknown";
+};
+
+
 // Helper: get ISO week number
 const getWeekNumber = (d) => {
   const date = new Date(d);
@@ -192,9 +230,20 @@ const [userSettings, setUserSettings] = useState(() => {
   const saved = localStorage.getItem("userSettings");
   return saved ? JSON.parse(saved) : null;
 });
+const [accounts, setAccounts] = useState([]); // all accounts for the user
+const [currentAccountId, setCurrentAccountId] = useState(null); // active account
+
 
 const [deposits, setDeposits] = useState([]);
 const [withdrawals, setWithdrawals] = useState([]);
+const [tradeTime, setTradeTime] = useState(() => {
+  // Default to current Nigeria time in HH:MM format
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  return `${hh}:${mm}`;
+});
+
 
 
 
@@ -401,6 +450,7 @@ const closeDailyDetails = () => {
   setSelectedDayTrades([]);
 };
 
+// --- Auth session bootstrap ---
 useEffect(() => {
   // ✅ Load current session on refresh
   getCurrentSession().then(({ data }) => {
@@ -426,49 +476,17 @@ useEffect(() => {
   return () => subscription.unsubscribe();
 }, []);
 
-
-
-// Restore account state from localStorage
-useEffect(() => {
-  const saved = loadAccountState();
-  if (saved) {
-    if (saved.capital !== undefined) setCapital(saved.capital);
-    if (saved.theme) setTheme(saved.theme);
-    if (saved.depositAmount !== undefined) setDepositAmount(saved.depositAmount);
-    if (saved.withdrawAmount !== undefined) setWithdrawAmount(saved.withdrawAmount);
-    if (saved.userSettings) setUserSettings(saved.userSettings);
-  }
-}, []);
-
-useEffect(() => {
-  persistAccountState();
-}, [capital, theme, depositAmount, withdrawAmount, userSettings]);
-
-
-
-  
-    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-    const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-
-    const journalPath = `artifacts/${appId}/users/${userId}/tradingJournal`;
-    const journalDocRef = db ? doc(db, journalPath, "data") : null;
-
-// ------------------ Local persistence helpers ------------------
-
 // ------------------ Local persistence helpers ------------------
 
 // Keys (scoped per user)
 const tradingKey = (uid) => `tradingJournal:${uid}`;
 const accountKey = (uid) => `accountState:${uid}`;
-const userSettingsKey = (uid) => `userSettings:${uid}`;
 
-// Persist trades/journal
-// Save trades
+// Persist journal
 const persistJournal = async (openTrades, historyTrades, accountType) => {
-  if (!userId) return;
+  if (!userId || !currentAccountId) return;
 
-  // ✅ local fallback
+  // ✅ Local fallback
   localStorage.setItem(
     tradingKey(userId),
     JSON.stringify({
@@ -479,27 +497,27 @@ const persistJournal = async (openTrades, historyTrades, accountType) => {
     })
   );
 
-  // ✅ supabase
-  const { error } = await supabase
-    .from("trading_journals")
-    .upsert({
-      user_id: userId,
-      trades_open: openTrades || [],
-      trades_history: historyTrades || [],
-      account_type: accountType ?? userSettings?.accountType ?? null,
-      updated_at: new Date().toISOString(),
-    });
+  // ✅ Supabase
+  const { error } = await supabase.from("trading_journals").upsert({
+    user_id: userId,
+    account_id: currentAccountId,
+    trades_open: openTrades || [],
+    trades_history: historyTrades || [],
+    account_type: accountType ?? userSettings?.accountType ?? null,
+    updated_at: new Date().toISOString(),
+  });
 
   if (error) console.error("Supabase journal save error:", error);
 };
 
-// Load trades
-const loadJournalFromSupabase = async (uid) => {
+// Load journal from Supabase
+const loadJournalFromSupabase = async (uid, accountId) => {
   const { data, error } = await supabase
     .from("trading_journals")
     .select("*")
     .eq("user_id", uid)
-    .single();
+    .eq("account_id", accountId)
+    .maybeSingle();
 
   if (error) {
     console.error("Supabase journal load error:", error);
@@ -508,20 +526,9 @@ const loadJournalFromSupabase = async (uid) => {
   return data;
 };
 
-// Load trades/journal
-const loadLocalJournal = (uid) => {
-  try {
-    const raw = localStorage.getItem(tradingKey(uid));
-    return raw ? JSON.parse(raw) : null;
-  } catch (err) {
-    console.error("Failed to load local journal:", err);
-    return null;
-  }
-};
-
-// Save account
+// Save account state
 const persistAccountState = async () => {
-  if (!userId) return;
+  if (!userId || !currentAccountId) return;
 
   const data = {
     capital,
@@ -534,114 +541,79 @@ const persistAccountState = async () => {
 
   localStorage.setItem(accountKey(userId), JSON.stringify(data));
 
-  const { error } = await supabase.from("account_states").upsert({
-    user_id: userId,
-    ...data,
-  });
+  const { error } = await supabase.from("accounts").update(data).eq("id", currentAccountId);
 
   if (error) console.error("Supabase account save error:", error);
 };
 
-// Load account
-const loadAccountFromSupabase = async (uid) => {
-  const { data, error } = await supabase
-    .from("account_states")
-    .select("*")
-    .eq("user_id", uid)
-    .single();
-
-  if (error) {
-    console.error("Supabase account load error:", error);
-    return null;
-  }
-  return data;
-};
-
 // ------------------ end local helpers ------------------
 
+useEffect(() => {
+  if (!tradeTime) {
+    const now = new Date();
+    const hours = String(now.getHours()).padStart(2, "0");
+    const minutes = String(now.getMinutes()).padStart(2, "0");
+    setTradeTime(`${hours}:${minutes}`);
+  }
+}, []);
 
-// --- Hydrate state from localStorage when userId changes ---
+// --- Load all accounts when user logs in ---
 useEffect(() => {
   if (!userId) return;
 
-  // Load account state
-  const loadAccount = async () => {
-    const { data, error } = await supabase
-      .from("account_states")
+  const loadAccounts = async () => {
+    const { data: accounts, error } = await supabase
+      .from("accounts")
       .select("*")
       .eq("user_id", userId)
-      .single();
+      .order("created_at", { ascending: true });
 
     if (error) {
-      console.error("Load account error:", error);
+      console.error("Load accounts error:", error);
       return;
     }
 
-    if (data) {
-      setCapital(data.capital ?? 0);
-      setTheme(data.theme ?? "dark");
-      setDepositAmount(data.deposit_amount ?? 0);
-      setWithdrawAmount(data.withdraw_amount ?? 0);
-      setUserSettings(data.user_settings ?? {});
+    if (accounts && accounts.length > 0) {
+      setAccounts(accounts);
+      const current = accounts[0]; // default first account
+      setCurrentAccountId(current.id);
+      setCapital(current.capital ?? 0);
+      setTheme(current.theme ?? "dark");
+      setDepositAmount(current.deposit_amount ?? 0);
+      setWithdrawAmount(current.withdraw_amount ?? 0);
+      setUserSettings(current.user_settings ?? {});
+    } else {
+      console.log("No accounts found, user should create one.");
     }
   };
 
-  // Load trading journal
+  loadAccounts();
+}, [userId]);
+
+// --- Load journal whenever account changes ---
+useEffect(() => {
+  if (!userId || !currentAccountId) return;
+
   const loadJournal = async () => {
-    const { data, error } = await supabase
-      .from("trading_journals")
-      .select("*")
-      .eq("user_id", userId)
-      .single();
-
-    if (error) {
-      console.error("Load journal error:", error);
-      return;
-    }
-
+    const data = await loadJournalFromSupabase(userId, currentAccountId);
     if (data) {
       setTradesOpen(data.trades_open ?? []);
       setTradesHistory(data.trades_history ?? []);
+    } else {
+      setTradesOpen([]);
+      setTradesHistory([]);
     }
   };
 
-  loadAccount();
   loadJournal();
-}, [userId]);
+}, [userId, currentAccountId]);
 
-
-
-// --- Real-time Data Listener with onSnapshot ---
+// --- Persist account state whenever dependencies change ---
 useEffect(() => {
-  if (!journalDocRef || !userId) return;
+  persistAccountState();
+}, [capital, theme, depositAmount, withdrawAmount, userSettings]);
 
-  const unsubscribe = onSnapshot(
-    journalDocRef,
-    (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        setTradesOpen(data.tradesOpen || []);
-        setTradesHistory(data.tradesHistory || []);
-      } else {
-        // Remote empty → fallback to local if available
-        const local = loadLocalJournal(userId);
-        if (local) {
-          setTradesOpen(local.tradesOpen || []);
-          setTradesHistory(local.tradesHistory || []);
-        } else {
-          setTradesOpen([]);
-          setTradesHistory([]);
-        }
-      }
-    },
-    (error) => console.error("Error listening to document:", error)
-  );
-
-  return () => unsubscribe();
-}, [journalDocRef, userId]);
-
-
-// --- One-time migration: ensure session/strategy fields ---
+// --- One-time migration (session + strategy fields) ---
 useEffect(() => {
   try {
     if (!tradesHistory || tradesHistory.length === 0) return;
@@ -659,9 +631,6 @@ useEffect(() => {
 
     setTradesHistory(patched);
     persistJournal(tradesOpen, patched).catch(console.error);
-    if (journalDocRef) {
-      setDoc(journalDocRef, { tradesOpen, tradesHistory: patched }).catch(console.error);
-    }
 
     localStorage.setItem("tradingJournal:migrated_session_strategy_v1", "1");
   } catch (e) {
@@ -1125,7 +1094,8 @@ const handleSaveClose = async () => {
   const rawPoints = (exitPriceNum - trade.entryPrice) * mult;
 
   // signed points based on trade type
-  const pointsSigned = trade.type === "long" ? Math.round(rawPoints) : Math.round(-rawPoints);
+  const pointsSigned =
+    trade.type === "long" ? Math.round(rawPoints) : Math.round(-rawPoints);
 
   // compute PnL in currency
   const computedPnL = pointsSigned * trade.lotSize * trade.valuePerPip;
@@ -1169,40 +1139,28 @@ const handleSaveClose = async () => {
     beforeImage: before,
     afterImage: after,
     note: closeNote,
-    // preserve these so the More modal can show them
     session: trade.session ?? "",
     strategy: trade.strategy ?? "",
   };
 
-  // Update states
+  // ✅ Update states
   const updatedTradesOpen = tradesOpen.filter((t) => t.id !== trade.id);
   const updatedTradesHistory = [...tradesHistory, closed];
   setTradesOpen(updatedTradesOpen);
   setTradesHistory(updatedTradesHistory);
+
+  // ✅ Persist journal to Supabase
   await persistJournal(updatedTradesOpen, updatedTradesHistory);
 
-  // ✅ Persist to Firestore (optional remote sync)
-  if (journalDocRef) {
-    try {
-      await setDoc(journalDocRef, {
-        tradesOpen: updatedTradesOpen,
-        tradesHistory: updatedTradesHistory,
-      });
-    } catch (e) {
-      console.error("Error updating document:", e);
-    }
-  }
-
-  // Close modal + reset
+  // ✅ Close modal + reset
   setModalOpen(false);
   setSelectedTradeId(null);
   setModalExitDate("");
   setModalExitPrice("");
   setModalActualPnL("");
   setModalStatus("active");
-  setCloseNote(""); // ✅ clear note after saving
+  setCloseNote(""); // clear note after saving
 };
-
 
 
 
@@ -1223,19 +1181,24 @@ const handleSaveEditedTrade = async () => {
       : Math.round(-rawPoints);
 
     // ✅ Consistent PnL logic
-    const pnlCurrency = Number((pointsSigned * editingTrade.lotSize * editingTrade.valuePerPip).toFixed(2));
-    const pnlPercent = capital ? Number(((pnlCurrency / capital) * 100).toFixed(2)) : 0;
+ // ✅ If user typed Actual PnL, use it, else recalc
+const manualPnL = editingTrade.pnlCurrency;
+const computedPnL = Number((pointsSigned * editingTrade.lotSize * editingTrade.valuePerPip).toFixed(2));
+const pnlCurrency = isNaN(manualPnL) ? computedPnL : manualPnL;
+const pnlPercent = capital ? Number(((pnlCurrency / capital) * 100).toFixed(2)) : 0;
 
-    const updatedTrade = {
-      ...editingTrade,
-      exitPrice: exitPriceNum,
-      exitDate: editingTrade.exitDate,
-      points: pointsSigned,
-      pnlCurrency,
-      pnlPercent,
-      session: editingTrade.session ?? "",
-      strategy: editingTrade.strategy ?? "",
-    };
+const updatedTrade = {
+  ...editingTrade,
+  entryDate: editingTrade.entryDate,   // ✅ allow editing entry date
+  exitPrice: exitPriceNum,
+  exitDate: editingTrade.exitDate,
+  points: pointsSigned,
+  pnlCurrency,
+  pnlPercent,
+  session: editingTrade.session ?? "",
+  strategy: editingTrade.strategy ?? "",
+};
+
 
     // ✅ Update tradesHistory
     const updatedTradesHistory = tradesHistory.map(t =>
@@ -2246,25 +2209,28 @@ const dailyBreakdown = useMemo(() => {
       </div>
 
       {/* Session */}
-      <div className="flex flex-col">
-        <label className="text-sm font-medium text-gray-200 mb-1" htmlFor="session">Session</label>
-        <select
-          id="session"
-          name="session"
-          value={formData.session || ""}
-          onChange={handleChange}
-          className="mt-1 block w-full rounded-md bg-gray-800 border border-gray-600 text-gray-200 p-2"
-        >
-          <option value="">Select Session</option>
-          <option value="Sydney">Sydney</option>
-          <option value="Tokyo">Tokyo</option>
-          <option value="London">London</option>
-          <option value="New-York">New-York</option>
-          <option value="Sydney & Tokyo">Sydney & Tokyo</option>
-          <option value="Tokyo & London">Tokyo & London</option>
-          <option value="London & New York">London & New York</option>
-        </select>
-      </div>
+      {/* Time Input for Session Auto-Detection */}
+<div className="flex flex-col">
+  <label
+    className="text-sm font-medium text-gray-400 mb-1"
+    htmlFor="tradeTime"
+  >
+    Trade Time
+  </label>
+  <input
+    type="time"
+    id="tradeTime"
+    name="tradeTime"
+    value={tradeTime}
+    onChange={(e) => setTradeTime(e.target.value)}
+    className={styles.input}
+  />
+
+  {/* Session Output */}
+  <p className="text-sm text-gray-300 mt-2">
+    Session: {getSessionForTime(tradeTime)}
+  </p>
+</div>
 
       {/* Strategy */}
       <div className="flex flex-col">
@@ -2467,99 +2433,147 @@ const dailyBreakdown = useMemo(() => {
                             </div>
                         </div>
 
-                        {/* CLOSE TRADE MODAL */}
-                        <Modal
-                            isOpen={modalOpen}
-                            onClose={() => setModalOpen(false)}
-                            title="Close Trade">
-                            <form className="space-y-4">
-                                <div className="flex flex-col">
-                                    <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="modalExitDate">Exit Date</label>
-                                    <input
-                                        type="date"
-                                        id="modalExitDate"
-                                        name="modalExitDate"
-                                        value={modalExitDate}
-                                        onChange={(e) => setModalExitDate(e.target.value)}
-                                        className={styles.input}
-                                    />
-                                </div>
-                                <div className="flex flex-col">
-                                    <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="modalExitPrice">Exit Price</label>
-                                    <input
-                                        type="number"
-                                        id="modalExitPrice"
-                                        name="modalExitPrice"
-                                        value={modalExitPrice}
-                                        onChange={(e) => {
-                                            const val = e.target.value;
-                                            setModalExitPrice(val);
-                                            const trade = tradesOpen.find(t => t.id === selectedTradeId);
-                                            if (trade) {
-                                                const expectedPnL = computeExpectedCurrencyForClose(trade, val);
-                                                setModalActualPnL(expectedPnL.toFixed(2));
-                                            }
-                                        }}
-                                        className={styles.input}
-                                        step="0.00001"
-                                    />
-                                </div>
-                                <div className="flex flex-col">
-                                    <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="modalActualPnL">Actual P&L ($)</label>
-                                    <input
-                                        type="number"
-                                        id="modalActualPnL"
-                                        name="modalActualPnL"
-                                        value={modalActualPnL}
-                                        onChange={(e) => setModalActualPnL(e.target.value)}
-                                        className={styles.input}
-                                        step="0.01"
-                                    />
-                                </div>
-                               <div className="flex flex-col">
-  <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="afterImage">After Image URL</label>
-  <input
-    type="url"
-    id="afterImage"
-    name="afterImage"
-    value={modalAfterImage || ''}
-    onChange={(e) => setModalAfterImage(e.target.value)}
-    placeholder="https://example.com/after.jpg"
-    className={styles.input}
-  />
-  <p className="text-xs text-gray-500 mt-1">Paste after image URL (optional)</p>
-</div>
-<div className="space-y-1">
-  <label className="block text-gray-300 text-sm">Note</label>
-  <textarea
-    value={closeNote}
-    onChange={(e) => setCloseNote(e.target.value)}
-    className="w-full bg-gray-700 text-white rounded px-3 py-2"
-    rows="3"
-    placeholder="Write your notes about this trade..."
-  />
-</div>
+                       {/* CLOSE TRADE MODAL */}
+<Modal
+  isOpen={modalOpen}
+  onClose={() => setModalOpen(false)}
+  title="Close Trade"
+>
+  <form className="space-y-4">
+    {/* Exit Date */}
+    <div className="flex flex-col">
+      <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="modalExitDate">
+        Exit Date
+      </label>
+      <input
+        type="date"
+        id="modalExitDate"
+        name="modalExitDate"
+        value={modalExitDate}
+        onChange={(e) => setModalExitDate(e.target.value)}
+        className={styles.input}
+      />
+    </div>
 
+    {/* Exit Price with SL/TP buttons */}
+    <div className="flex flex-col">
+      <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="modalExitPrice">
+        Exit Price
+      </label>
+      <div className="flex items-center space-x-2">
+        <input
+          type="number"
+          id="modalExitPrice"
+          name="modalExitPrice"
+          value={modalExitPrice}
+          onChange={(e) => {
+            const val = e.target.value;
+            setModalExitPrice(val);
+            const trade = tradesOpen.find(t => t.id === selectedTradeId);
+            if (trade) {
+              const expectedPnL = computeExpectedCurrencyForClose(trade, val);
+              setModalActualPnL(expectedPnL.toFixed(2));
+            }
+          }}
+          className={styles.input + " flex-1"}
+          step="0.00001"
+        />
 
+        {/* SL Button */}
+        <button
+          type="button"
+          onClick={() => {
+            const trade = tradesOpen.find(t => t.id === selectedTradeId);
+            if (trade?.stopLoss) setModalExitPrice(trade.stopLoss);
+          }}
+          className="px-3 py-1 rounded-md bg-red-600 text-white text-sm hover:bg-red-700 transition"
+        >
+          SL
+        </button>
 
-                                <div className="flex flex-col">
-                                    <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="modalStatus">Trade Status</label>
-                                    <select
-                                        id="modalStatus"
-                                        name="modalStatus"
-                                        value={modalStatus}
-                                        onChange={(e) => setModalStatus(e.target.value)}
-                                        className={styles.input}
-                                    >
-                                        <option value="active">Active</option>
-                                        <option value="cancel">Cancelled</option>
-                                    </select>
-                                </div>
-                                <button type="button" onClick={handleSaveClose} className={styles.submitButton}>
-                                    Save and Close Trade
-                                </button>
-                            </form>
-                        </Modal>
+        {/* TP Button */}
+        <button
+          type="button"
+          onClick={() => {
+            const trade = tradesOpen.find(t => t.id === selectedTradeId);
+            if (trade?.takeProfit) setModalExitPrice(trade.takeProfit);
+          }}
+          className="px-3 py-1 rounded-md bg-green-600 text-white text-sm hover:bg-green-700 transition"
+        >
+          TP
+        </button>
+      </div>
+    </div>
+
+    {/* Actual PnL */}
+    <div className="flex flex-col">
+      <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="modalActualPnL">
+        Actual P&L ($)
+      </label>
+      <input
+        type="number"
+        id="modalActualPnL"
+        name="modalActualPnL"
+        value={modalActualPnL}
+        onChange={(e) => setModalActualPnL(e.target.value)}
+        className={styles.input}
+        step="0.01"
+      />
+    </div>
+
+    {/* After Image */}
+    <div className="flex flex-col">
+      <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="afterImage">
+        After Image URL
+      </label>
+      <input
+        type="url"
+        id="afterImage"
+        name="afterImage"
+        value={modalAfterImage || ""}
+        onChange={(e) => setModalAfterImage(e.target.value)}
+        placeholder="https://example.com/after.jpg"
+        className={styles.input}
+      />
+      <p className="text-xs text-gray-500 mt-1">Paste after image URL (optional)</p>
+    </div>
+
+    {/* Notes */}
+    <div className="space-y-1">
+      <label className="block text-gray-300 text-sm">Note</label>
+      <textarea
+        value={closeNote}
+        onChange={(e) => setCloseNote(e.target.value)}
+        className="w-full bg-gray-700 text-white rounded px-3 py-2"
+        rows="3"
+        placeholder="Write your notes about this trade..."
+      />
+    </div>
+
+    {/* Status */}
+    <div className="flex flex-col">
+      <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="modalStatus">
+        Trade Status
+      </label>
+      <select
+        id="modalStatus"
+        name="modalStatus"
+        value={modalStatus}
+        onChange={(e) => setModalStatus(e.target.value)}
+        className={styles.input}
+      >
+        <option value="active">Active</option>
+        <option value="cancel">Cancelled</option>
+      </select>
+    </div>
+
+    {/* Save button */}
+    <button type="button" onClick={handleSaveClose} className={styles.submitButton}>
+      Save and Close Trade
+    </button>
+  </form>
+</Modal>
+
                         <Modal
                             isOpen={showErrorModal}
                             onClose={() => setShowErrorModal(false)}
@@ -2580,6 +2594,26 @@ const dailyBreakdown = useMemo(() => {
   title="Edit Trade"
 >
   <form className="space-y-4">
+    {/* Entry Date */}
+    <div className="flex flex-col">
+      <label
+        className="text-sm font-medium text-gray-400 mb-1"
+        htmlFor="editEntryDate"
+      >
+        Entry Date
+      </label>
+      <input
+        type="date"
+        id="editEntryDate"
+        name="editEntryDate"
+        value={editingTrade?.entryDate || ""}
+        onChange={(e) =>
+          setEditingTrade({ ...editingTrade, entryDate: e.target.value })
+        }
+        className={styles.input}
+      />
+    </div>
+
     {/* Exit Date */}
     <div className="flex flex-col">
       <label
@@ -2621,6 +2655,30 @@ const dailyBreakdown = useMemo(() => {
       />
     </div>
 
+    {/* Actual PnL Override */}
+    <div className="flex flex-col">
+      <label
+        className="text-sm font-medium text-gray-400 mb-1"
+        htmlFor="editActualPnL"
+      >
+        Actual PnL ($)
+      </label>
+      <input
+        type="number"
+        id="editActualPnL"
+        name="editActualPnL"
+        value={editingTrade?.pnlCurrency ?? ""}
+        onChange={(e) =>
+          setEditingTrade({
+            ...editingTrade,
+            pnlCurrency: Number(e.target.value),
+          })
+        }
+        className={styles.input}
+        step="0.01"
+      />
+    </div>
+
     {/* Save button */}
     <button
       type="button"
@@ -2631,6 +2689,7 @@ const dailyBreakdown = useMemo(() => {
     </button>
   </form>
 </Modal>
+
 <Modal
   isOpen={showDeleteConfirm}
   onClose={cancelDelete}
@@ -3380,42 +3439,30 @@ case "settings":
       {/* Content area */}
       <main className="flex-1 bg-gray-800 rounded-2xl shadow-lg border border-gray-700 p-8">
         {/* User Settings */}
-        {settingsView === "user" && (
-          <div>
-            <h2 className="text-2xl font-bold mb-6 text-white">User Settings</h2>
-            <UserSettingsForm
-              onSave={(settings) => {
-                setUserSettings(settings);
+{settingsView === "user" && (
+  <div>
+    <h2 className="text-2xl font-bold mb-6 text-white">User Settings</h2>
+    <UserSettingsForm
+      userId={userId}
+      onAccountCreated={(newAccount) => {
+        // Add new account into state
+        setAccounts((prev) => [...prev, newAccount]);
 
-                if (settings.startingCapital) setCapital(settings.startingCapital);
-                if (settings.accountName) {
-                  setFormData((prev) => ({
-                    ...prev,
-                    accountName: settings.accountName,
-                  }));
-                }
-                if (settings.accountPlan) {
-                  setFormData((prev) => ({
-                    ...prev,
-                    accountPlan: settings.accountPlan,
-                  }));
-                }
-                if (settings.accountType) {
-                  setFormData((prev) => ({
-                    ...prev,
-                    accountType: settings.accountType,
-                  }));
-                }
+        // Auto-select the new account
+        setCurrentAccountId(newAccount.id);
 
-                localStorage.setItem("userSettings", JSON.stringify(settings));
-
-                if (journalDocRef) {
-                  setDoc(journalDocRef, { userSettings: settings }, { merge: true });
-                }
-              }}
-            />
-          </div>
-        )}
+        // Sync capital + other fields
+        setCapital(newAccount.capital ?? 0);
+        setFormData((prev) => ({
+          ...prev,
+          accountName: newAccount.account_name,
+          accountPlan: newAccount.account_plan,
+          accountType: newAccount.account_type,
+        }));
+      }}
+    />
+  </div>
+)}
 
         {/* Theme */}
         {settingsView === "theme" && (
