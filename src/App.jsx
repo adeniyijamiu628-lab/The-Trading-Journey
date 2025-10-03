@@ -3,6 +3,7 @@ import { LineChart,Line,XAxis,YAxis,Tooltip,CartesianGrid,ResponsiveContainer,Re
 import { signUp, signIn, signOut, getCurrentSession, onAuthStateChange } from "./authService";
 import UserSettingsForm from "./UserSettingsForm";
 import AuthPage from "./AuthPage";
+import { supabase } from "./supabaseClient";
 
 
 // ------------------- Icons -------------------
@@ -77,6 +78,11 @@ const loadAccountState = () => {
     console.error("Failed to load account state:", err);
     return null;
   }
+};
+
+const handleCapitalUpdate = (newCapital) => {
+  setCapital(newCapital);
+  persistAccountState(); // this pushes to Supabase + localStorage
 };
 
 // Helper: get ISO week number
@@ -278,30 +284,45 @@ const handleFundsWithdrawal = () => {
 
 
 
-    const handleSignup = async () => {
-    try {
-      const user = await registerUser("test@example.com", "password123");
-      setUserId(user.uid);
-      console.log("Signed up:", user.uid);
-    } catch (err) {
-      console.error("Signup error:", err.message);
+// --- Supabase Authentication ---
+const handleSignup = async (email, password) => {
+  try {
+    const { data, error } = await supabase.auth.signUp({ email, password });
+    if (error) throw error;
+    if (data.user) {
+      setUserId(data.user.id);
+      setUser(data.user);
+      console.log("Signed up:", data.user.id);
     }
-  };
+  } catch (err) {
+    console.error("Signup error:", err.message);
+  }
+};
 
-  const handleLogin = async () => {
-    try {
-      const user = await loginUser("test@example.com", "password123");
-      setUserId(user.uid);
-      console.log("Logged in:", user.uid);
-    } catch (err) {
-      console.error("Login error:", err.message);
+const handleLogin = async (email, password) => {
+  try {
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw error;
+    if (data.user) {
+      setUserId(data.user.id);
+      setUser(data.user);
+      console.log("Logged in:", data.user.id);
     }
-  };
+  } catch (err) {
+    console.error("Login error:", err.message);
+  }
+};
 
- const handleLogout = async () => {
-    await logoutUser();
+const handleLogout = async () => {
+  try {
+    await supabase.auth.signOut();
     setUserId(null);
-  };
+    setUser(null);
+  } catch (err) {
+    console.error("Logout error:", err.message);
+  }
+};
+
 
 // Export
 const handleExportData = () => {
@@ -386,20 +407,43 @@ const closeDailyDetails = () => {
 };
 
 useEffect(() => {
-  getCurrentSession().then(({ data }) => {
-    setUser(data?.session?.user ?? null);
-    setLoading(false); // ✅ stop loading once we checked session
-  });
+  // ✅ Check current session on load
+  const getSession = async () => {
+    const { data, error } = await supabase.auth.getSession();
+    if (error) {
+      console.error("Session error:", error.message);
+      setLoading(false);
+      return;
+    }
+    if (data?.session?.user) {
+      setUser(data.session.user);
+      setUserId(data.session.user.id);
+    } else {
+      setUser(null);
+      setUserId(null);
+    }
+    setLoading(false);
+  };
 
-  const subscription = onAuthStateChange((user) => {
-    setUser(user);
-    setLoading(false); // ✅ stop loading on auth change too
+  getSession();
+
+  // ✅ Subscribe to auth state changes
+  const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+    if (session?.user) {
+      setUser(session.user);
+      setUserId(session.user.id);
+    } else {
+      setUser(null);
+      setUserId(null);
+    }
+    setLoading(false);
   });
 
   return () => {
-    if (subscription) subscription.unsubscribe();
+    listener.subscription.unsubscribe();
   };
 }, []);
+
 
 // Restore account state from localStorage
 useEffect(() => {
@@ -437,29 +481,48 @@ const accountKey = (uid) => `accountState:${uid}`;
 const userSettingsKey = (uid) => `userSettings:${uid}`;
 
 // Persist trades/journal
+// Save trades
 const persistJournal = async (openTrades, historyTrades, accountType) => {
   if (!userId) return;
 
-  // local fallback
-  localStorage.setItem(tradingKey(userId), JSON.stringify({
-    tradesOpen: openTrades || [],
-    tradesHistory: historyTrades || [],
-    accountType: accountType ?? userSettings?.accountType ?? null,
-    savedAt: new Date().toISOString(),
-  }));
+  // ✅ local fallback
+  localStorage.setItem(
+    tradingKey(userId),
+    JSON.stringify({
+      tradesOpen: openTrades || [],
+      tradesHistory: historyTrades || [],
+      accountType: accountType ?? userSettings?.accountType ?? null,
+      savedAt: new Date().toISOString(),
+    })
+  );
 
-  // supabase sync
+  // ✅ supabase
   const { error } = await supabase
-    .from('trading_journals')
+    .from("trading_journals")
     .upsert({
       user_id: userId,
       trades_open: openTrades || [],
       trades_history: historyTrades || [],
       account_type: accountType ?? userSettings?.accountType ?? null,
-      updated_at: new Date().toISOString()
+      updated_at: new Date().toISOString(),
     });
 
-  if (error) console.error("Failed to save to Supabase:", error);
+  if (error) console.error("Supabase journal save error:", error);
+};
+
+// Load trades
+const loadJournalFromSupabase = async (uid) => {
+  const { data, error } = await supabase
+    .from("trading_journals")
+    .select("*")
+    .eq("user_id", uid)
+    .single();
+
+  if (error) {
+    console.error("Supabase journal load error:", error);
+    return null;
+  }
+  return data;
 };
 
 // Load trades/journal
@@ -473,37 +536,42 @@ const loadLocalJournal = (uid) => {
   }
 };
 
-// Persist account + settings
-const persistAccountState = () => {
+// Save account
+const persistAccountState = async () => {
   if (!userId) return;
 
-  try {
-    const data = {
-      capital,
-      theme,
-      depositAmount,
-      withdrawAmount,
-      userSettings,
-      savedAt: new Date().toISOString(),
-    };
-    localStorage.setItem(accountKey(userId), JSON.stringify(data));
-    if (userSettings) {
-      localStorage.setItem(userSettingsKey(userId), JSON.stringify(userSettings));
-    }
-  } catch (err) {
-    console.error("Failed to persist account state:", err);
-  }
+  const data = {
+    capital,
+    theme,
+    deposit_amount: depositAmount,
+    withdraw_amount: withdrawAmount,
+    user_settings: userSettings,
+    updated_at: new Date().toISOString(),
+  };
+
+  localStorage.setItem(accountKey(userId), JSON.stringify(data));
+
+  const { error } = await supabase.from("account_states").upsert({
+    user_id: userId,
+    ...data,
+  });
+
+  if (error) console.error("Supabase account save error:", error);
 };
 
-// Load account + settings
-const loadAccountState = (uid) => {
-  try {
-    const raw = localStorage.getItem(accountKey(uid));
-    return raw ? JSON.parse(raw) : null;
-  } catch (err) {
-    console.error("Failed to load account state:", err);
+// Load account
+const loadAccountFromSupabase = async (uid) => {
+  const { data, error } = await supabase
+    .from("account_states")
+    .select("*")
+    .eq("user_id", uid)
+    .single();
+
+  if (error) {
+    console.error("Supabase account load error:", error);
     return null;
   }
+  return data;
 };
 
 // ------------------ end local helpers ------------------
@@ -513,23 +581,51 @@ const loadAccountState = (uid) => {
 useEffect(() => {
   if (!userId) return;
 
-  const loadSupabaseJournal = async () => {
+  // Load account state
+  const loadAccount = async () => {
     const { data, error } = await supabase
-      .from('trading_journals')
-      .select('*')
-      .eq('user_id', userId)
+      .from("account_states")
+      .select("*")
+      .eq("user_id", userId)
       .single();
 
+    if (error) {
+      console.error("Load account error:", error);
+      return;
+    }
+
     if (data) {
-      setTradesOpen(data.trades_open || []);
-      setTradesHistory(data.trades_history || []);
-    } else if (error) {
-      console.error("Supabase load error:", error);
+      setCapital(data.capital ?? 0);
+      setTheme(data.theme ?? "dark");
+      setDepositAmount(data.deposit_amount ?? 0);
+      setWithdrawAmount(data.withdraw_amount ?? 0);
+      setUserSettings(data.user_settings ?? {});
     }
   };
 
-  loadSupabaseJournal();
+  // Load trading journal
+  const loadJournal = async () => {
+    const { data, error } = await supabase
+      .from("trading_journals")
+      .select("*")
+      .eq("user_id", userId)
+      .single();
+
+    if (error) {
+      console.error("Load journal error:", error);
+      return;
+    }
+
+    if (data) {
+      setTradesOpen(data.trades_open ?? []);
+      setTradesHistory(data.trades_history ?? []);
+    }
+  };
+
+  loadAccount();
+  loadJournal();
 }, [userId]);
+
 
 
 // --- Real-time Data Listener with onSnapshot ---
