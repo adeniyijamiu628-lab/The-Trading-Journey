@@ -1,31 +1,11 @@
-import React, { useState, useMemo, useEffect } from "react";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea } from "recharts";
-import LoginPage from "./LoginPage";
-import { supabase } from "./supabaseClient";
-
-// Sign up
-export async function registerUser(email, password) {
-  const { data, error } = await supabase.auth.signUp({ email, password });
-  if (error) throw error;
-  return data.user;
-}
-
-// Login
-export async function loginUser(email, password) {
-  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-  if (error) throw error;
-  return data.user;
-}
-
-// Logout
-export async function logoutUser() {
-  const { error } = await supabase.auth.signOut();
-  if (error) throw error;
-}
+import { useState, useMemo, useEffect } from "react";
+import { LineChart,Line,XAxis,YAxis,Tooltip,CartesianGrid,ResponsiveContainer,ReferenceLine,BarChart,Bar,Cell} from "recharts";
+import { signUp, signIn, signOut, getCurrentSession, onAuthStateChange } from "./authService";
+import UserSettingsForm from "./UserSettingsForm";
+import AuthPage from "./AuthPage";
 
 
-
-// Inline SVG for icons to avoid external dependencies
+// ------------------- Icons -------------------
 const UpArrowIcon = () => (
   <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 inline ml-1" viewBox="0 0 24 24" fill="currentColor">
     <path d="M12 4l-8 8h6v8h4v-8h6z" />
@@ -38,6 +18,7 @@ const DownArrowIcon = () => (
   </svg>
 );
 
+// ------------------- Reusable UI -------------------
 const DashboardCard = ({ title, value, color }) => (
   <div className="p-6 rounded-2xl shadow-lg transition-all duration-300 transform hover:scale-105 backdrop-blur-md bg-white/10 border border-white/20 text-white">
     <h3 className="text-sm font-semibold opacity-75">{title}</h3>
@@ -45,10 +26,8 @@ const DashboardCard = ({ title, value, color }) => (
   </div>
 );
 
-// Custom Modal component
 const Modal = ({ isOpen, title, onClose, children }) => {
   if (!isOpen) return null;
-
   return (
     <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center p-4 z-50 animate-fade-in">
       <div className="bg-gray-800 rounded-3xl shadow-2xl w-full max-w-lg p-8 relative transform scale-95 animate-zoom-in border border-gray-700">
@@ -65,78 +44,68 @@ const Modal = ({ isOpen, title, onClose, children }) => {
   );
 };
 
-// Normalizes a row returned from Supabase (snake_case) to the camelCase shape UI expects.
-const normalizeTradeRow = (r) => {
-  if (!r) return null;
-  return {
-    id: r.id,
-    userId: r.user_id,
-    accountType: r.account_type ?? r.accountType ?? "Standard",
-    pair: r.pair,
-    type: r.type,
-    entryDate: r.entry_date ?? r.entryDate ?? (r.created_at ? new Date(r.created_at).toISOString().slice(0,10) : ""),
-    entryPrice: Number(r.entry_price ?? r.entryPrice ?? 0),
-    sl: Number(r.sl ?? 0),
-    tp: Number(r.tp ?? 0),
-    risk: Number(r.risk ?? 0),
-    lotSize: Number(r.lot_size ?? r.lotSize ?? 0),
-    valuePerPip: Number(r.value_per_pip ?? r.valuePerPip ?? 0),
-    status: r.status,
-    ratio: Number(r.ratio ?? 0),
-    beforeImage: r.before_image ?? r.beforeImage ?? null,
-    afterImage: r.after_image ?? r.afterImage ?? null,
-    createdAt: r.created_at ?? r.createdAt ?? null,
-    exitDate: r.exit_date ?? r.exitDate ?? null,
-    exitPrice: Number(r.exit_price ?? r.exitPrice ?? 0),
-    points: r.points ?? null,
-    pnlCurrency: Number(r.pnl_currency ?? r.pnlCurrency ?? 0),
-    pnlPercent: Number(r.pnl_percent ?? r.pnlPercent ?? 0),
-    closedAt: r.closed_at ?? r.closedAt ?? null,
-    session: r.session ?? null,
+// ------------------- Helpers -------------------
+
+const persistAccountState = async () => {
+  if (!userId) return;
+
+  const data = {
+    capital,
+    theme,
+    deposit_amount: depositAmount,
+    withdraw_amount: withdrawAmount,
+    user_settings: userSettings,
+    updated_at: new Date().toISOString(),
   };
+
+  localStorage.setItem(accountKey(userId), JSON.stringify(data));
+
+  const { error } = await supabase.from('account_states').upsert({
+    user_id: userId,
+    ...data
+  });
+
+  if (error) console.error("Supabase account save error:", error);
 };
 
-// Helper function to get the week number of a date
+const loadAccountState = () => {
+  try {
+    const raw = localStorage.getItem("accountState");
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (err) {
+    console.error("Failed to load account state:", err);
+    return null;
+  }
+};
+
+// Helper: get ISO week number
 const getWeekNumber = (d) => {
   const date = new Date(d);
   date.setHours(0, 0, 0, 0);
-  // Thursday in current week decides the year.
-  date.setDate(date.getDate() + 3 - ((date.getDay() + 6) % 7));
-  // January 4 is always in week 1.
-  const week1 = new Date(date.getFullYear(), 0, 4);
-  // Adjust to Thursday in week 1 and count number of weeks from date to week1.
-  return (
-    1 +
-    Math.round(
-      ((date.getTime() - week1.getTime()) / 86400000 - 3 + ((week1.getDay() + 6) % 7)) / 7
-    )
-  );
+  date.setDate(date.getDate() + 4 - (date.getDay() || 7)); // shift to Thursday
+  const yearStart = new Date(date.getFullYear(), 0, 1);
+  return Math.ceil(((date - yearStart) / 86400000 + 1) / 7);
 };
-const formatDate = (dateStr) => {
-  return new Date(dateStr).toLocaleDateString("en-GB");
-};
-// Helper to generate unique trade ID
-const generateTradeId = () =>
-  `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+
+const formatDate = (dateStr) => new Date(dateStr).toLocaleDateString("en-GB");
+
+const generateTradeId = () => `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
 
 const getMinMaxEquity = (data) => {
-  if (!data || data.length === 0) {
-    return { min: 0, max: 0 };
-  }
+  if (!data || data.length === 0) return { min: 0, max: 0 };
   const equities = data.map((d) => d.equity);
   const min = Math.min(...equities);
   const max = Math.max(...equities);
-  // Add some padding to the domain
-  const paddedMin = Math.floor(min / 50) * 50 - 50;
-  const paddedMax = Math.ceil(max / 50) * 50 + 50;
-  return { min: paddedMin, max: paddedMax };
+  return {
+    min: Math.floor(min / 50) * 50 - 50,
+    max: Math.ceil(max / 50) * 50 + 50,
+  };
 };
 
-// Classify trade outcome relative to risk
 const classifyTrade = (trade, capital) => {
   const pnl = trade.pnlCurrency || 0;
   const riskAmount = (trade.risk / 100) * capital;
-
   if (pnl < 0) return "loss";
   if (pnl >= 0 && pnl <= riskAmount) return "breakeven";
   return "win";
@@ -151,159 +120,163 @@ const isValidUrl = (s) => {
   }
 };
 
-// New function to process trade data for the weekly equity chart
-const processWeeklyEquityData = (trades) => {
+// ✅ Cleaner weekly equity calculation
+const processWeeklyEquityData = (trades, startingCapital = 1000) => {
   if (!trades || trades.length === 0) {
-    return [];
+    return [{ week: "Start", label: "Start", equity: Number(startingCapital) }];
   }
 
-  // Sort trades by date to ensure correct chronological processing
-  const sortedTrades = [...trades].sort(
-    (a, b) => new Date(a.exitDate) - new Date(b.exitDate)
-  );
-
-  const getWeekNumber = (d) => {
-    const date = new Date(d);
-    date.setHours(0, 0, 0, 0);
-    date.setDate(date.getDate() + 4 - (date.getDay() || 7));
-    const yearStart = new Date(date.getFullYear(), 0, 1);
-    const weekNo = Math.ceil(((date - yearStart) / 86400000 + 1) / 7);
-    return weekNo;
-  };
+  const sortedTrades = [...trades].sort((a, b) => new Date(a.exitDate) - new Date(b.exitDate));
 
   const weeklyDataMap = new Map();
-  let cumulativeEquity = 1000; // Starting capital
-
-  // First pass: aggregate PnL per week
   sortedTrades.forEach((trade) => {
-    const weekNum = getWeekNumber(new Date(trade.exitDate));
-    if (!weeklyDataMap.has(weekNum)) {
-      weeklyDataMap.set(weekNum, 0);
-    }
-    weeklyDataMap.set(
-      weekNum,
-      weeklyDataMap.get(weekNum) + trade.pnlCurrency
-    );
+    const weekNum = getWeekNumber(trade.exitDate); // ✅ use global version
+    weeklyDataMap.set(weekNum, (weeklyDataMap.get(weekNum) || 0) + (trade.pnlCurrency || 0));
   });
 
-  // Second pass: calculate cumulative equity for each week
-  const weeklyEquityData = [];
-  const sortedWeeks = Array.from(weeklyDataMap.keys()).sort((a, b) => a - b);
+  let cumulativeEquity = Number(startingCapital);
+  const weeklyEquityData = [
+    { week: "Start", label: "Start", equity: Number(cumulativeEquity.toFixed(2)) },
+  ];
 
-  sortedWeeks.forEach((week) => {
-    const weeklyPnl = weeklyDataMap.get(week);
-    cumulativeEquity += weeklyPnl;
-    weeklyEquityData.push({
-      week: `Week ${week}`,
-      equity: Number(cumulativeEquity.toFixed(2)),
+  Array.from(weeklyDataMap.keys())
+    .sort((a, b) => a - b)
+    .forEach((week) => {
+      cumulativeEquity += weeklyDataMap.get(week) || 0;
+      weeklyEquityData.push({
+        week: `Week ${week}`,
+        label: `Week ${week}`,
+        equity: Number(cumulativeEquity.toFixed(2)),
+      });
     });
-  });
 
   return weeklyEquityData;
 };
 
-// Fixed journal document ID
-const JOURNAL_ID = "main";
 
-// ------------------- AUTH PAGE (inline) -------------------
-const AuthPage = ({ onLogin }) => {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-
-// 🔹 LOGIN
-const handleLoginClick = async () => {
-  try {
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email: email.trim(),
-      password,
-    });
-
-    if (error) throw error;
-
-    if (data.user) {
-      onLogin(data.user.id); // Supabase UUID
-    }
-  } catch (err) {
-    console.error("Login failed:", err);
-    setError(err.message || "Login error");
-  }
-};
-
- const handleSignupClick = async () => {
-  try {
-    const { data, error } = await supabase.auth.signUp({
-      email: email.trim(),
-      password,
-    });
-
-    if (error) throw error;
-
-    if (data.user) {
-      onLogin(data.user.id); // Supabase UUID
-    }
-  } catch (err) {
-    console.error("Signup failed:", err);
-    setError(err.message || "Signup error");
-  }
-};
-
-  return (
-    <div className="flex flex-col items-center justify-center min-h-screen bg-gray-900 text-white">
-      <div className="bg-gray-800 p-8 rounded-xl shadow-lg w-full max-w-md">
-        <h2 className="text-2xl font-bold mb-6 text-center">Sign In / Sign Up</h2>
-
-        {error && <div className="mb-4 text-red-400 text-sm">{error}</div>}
-
-        <input
-          type="email"
-          placeholder="Email"
-          className="w-full mb-4 px-3 py-2 rounded bg-gray-700 focus:outline-none"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-        />
-
-        <input
-          type="password"
-          placeholder="Password"
-          className="w-full mb-4 px-3 py-2 rounded bg-gray-700 focus:outline-none"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-        />
-
-        <button
-          onClick={handleLoginClick}
-          className="w-full py-2 mb-3 bg-blue-600 hover:bg-blue-700 rounded"
-        >
-          Log In
-        </button>
-
-        <button
-          onClick={handleSignupClick}
-          className="w-full py-2 bg-green-600 hover:bg-green-700 rounded"
-        >
-          Sign Up
-        </button>
-      </div>
-    </div>
-  );
-};
-// ----------------- end AuthPage block ---------------------
-
-
+// ------------------- Main App -------------------
 export default function App() {
-    // --- Firestore Setup & State ---
+    const [db, setDb] = useState(null);
+    const [auth, setAuth] = useState(null);
     const [userId, setUserId] = useState(null);
     const [loading, setLoading] = useState(true);
+    const [session, setSession] = useState("");
+    const [strategy, setstrategy] = useState()
     const [theme, setTheme] = useState('dark');
-    const [capital, setCapital] = useState(1000);
+    const [capital, setCapital] = useState(0);
     const [newCapital, setNewCapital] = useState(1000);
     const [dailyDetailsOpen, setDailyDetailsOpen] = useState(false);
-    // For image preview
     const [imagePreview, setImagePreview] = useState(null);
-    const [session, setSession] = useState("");
+    const [closeNote, setCloseNote] = useState("");
     const [selectedDay, setSelectedDay] = useState(null); // 'YYYY-MM-DD' string
     const [selectedDayTrades, setSelectedDayTrades] = useState([]);
+    const [depositAmount, setDepositAmount] = useState("");
+    const [withdrawAmount, setWithdrawAmount] = useState("");
+
+// --- Lot Size Calculator states ---
+const [calcPair, setCalcPair] = useState("");
+const [calcPoints, setCalcPoints] = useState(0);
+const [calcRiskPercent, setCalcRiskPercent] = useState(2.0);
+const [calcAccountType, setCalcAccountType] = useState("Standard");
+const [user, setUser] = useState(null);
+const [email, setEmail] = useState("");
+const [password, setPassword] = useState("");
+const [settingsView, setSettingsView] = useState("menu"); 
+const [userSettings, setUserSettings] = useState(() => {
+  const saved = localStorage.getItem("userSettings");
+  return saved ? JSON.parse(saved) : null;
+});
+
+const [deposits, setDeposits] = useState([]);
+const [withdrawals, setWithdrawals] = useState([]);
+
+
+
+const handleDeposit = (amount) => {
+  setDeposits((prev) => [...prev, { date: new Date(), amount }]);
+  setEquity((prev) => prev + amount);
+};
+
+
+const handleWithdrawal = (amount) => {
+  setWithdrawals((prev) => [...prev, { date: new Date(), amount }]);
+  setEquity((prev) => prev - amount);
+};
+
+
+// Deposit handler (settings)
+const handleFundsDeposit = () => {
+  const amount = Number(depositAmount);
+  if (!amount || amount <= 0) return alert("Enter a valid deposit amount.");
+
+  const newCapitalValue = (capital || 0) + amount;
+  setCapital(newCapitalValue);
+  setDepositAmount("");
+  persistAccountState(); // ✅ save
+
+  // ✅ Record deposit transaction
+  setDeposits((prev) => [
+    ...prev,
+    { date: new Date().toISOString(), amount },
+  ]);
+
+  alert(`Successfully deposited $${amount}. New capital: $${newCapitalValue}`);
+};
+
+
+
+// Withdrawal handler (settings)
+const handleFundsWithdrawal = () => {
+  const amount = Number(withdrawAmount);
+  if (!amount || amount <= 0) {
+    alert("Enter a valid withdrawal amount");
+    return;
+  }
+
+  if (amount <= equity) {
+    setEquity((prev) => prev - amount);
+
+    // ✅ Record withdrawal transaction
+    setWithdrawals((prev) => [
+      ...prev,
+      { date: new Date().toISOString(), amount },
+    ]);
+
+    alert(`Withdrew $${amount} from equity`);
+  } else {
+    const shortfall = amount - equity;
+    const confirmWithdraw = window.confirm(
+      `You only have $${equity} available in equity. Do you want to withdraw the extra $${shortfall} from your capital?`
+    );
+
+    if (confirmWithdraw) {
+      const total = equity + capital;
+      if (amount > total) {
+        alert(`Insufficient funds. You only have $${total} total.`);
+        return;
+      }
+
+      setEquity(0);
+      setCapital((prev) => prev - shortfall);
+      persistAccountState(); // ✅ save
+
+      // ✅ Record withdrawal transaction
+      setWithdrawals((prev) => [
+        ...prev,
+        { date: new Date().toISOString(), amount },
+      ]);
+
+      alert(
+        `Withdrew $${amount} ($${equity} from equity, $${shortfall} from capital)`
+      );
+    }
+  }
+
+  setWithdrawAmount(""); // reset field
+};
+
+
+
 
     const handleSignup = async () => {
     try {
@@ -325,16 +298,65 @@ export default function App() {
     }
   };
 
-// 🔹 LOGOUT
-const handleLogout = async () => {
-  const { error } = await supabase.auth.signOut();
-  if (error) {
-    console.error("Logout failed:", error);
-  } else {
+ const handleLogout = async () => {
+    await logoutUser();
     setUserId(null);
+  };
+
+// Export
+const handleExportData = () => {
+  const data = { tradesOpen, tradesHistory };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "trades-backup.json";
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+// Import
+const handleImportData = (event) => {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const imported = JSON.parse(e.target.result);
+      setTradesOpen(imported.tradesOpen || []);
+      setTradesHistory(imported.tradesHistory || []);
+      persistJournal(imported.tradesOpen, imported.tradesHistory);
+      alert("Import successful!");
+    } catch (err) {
+      console.error("Failed to import file:", err);
+      alert("Import failed. Please check the file format.");
+    }
+  };
+  reader.readAsText(file);
+};
+
+// Reset
+const handleResetAccount = () => {
+  if (window.confirm("⚠️ Are you sure you want to reset your account? This will delete all your trades and reset balances.")) {
+    setTradesOpen([]);
+    setTradesHistory([]);
+    setEquity(0);
+    setCapital(0);
+    persistJournal([], []); // clear storage
+    localStorage.removeItem("userSettings"); // optional: wipe saved settings
+    alert("Your account has been reset.");
   }
 };
 
+
+const confirmDeleteTrade = (id) => {
+  setTradeToDeleteId(id);
+  setShowDeleteConfirm(true);
+};
+const cancelDelete = () => {
+  setTradeToDeleteId(null);
+  setShowDeleteConfirm(false);
+};
   
     // Open the daily details modal for a given date (ISO 'YYYY-MM-DD')
 const openDailyDetails = (dateKey, tradeId = null) => {
@@ -363,174 +385,232 @@ const closeDailyDetails = () => {
   setSelectedDayTrades([]);
 };
 
+useEffect(() => {
+  getCurrentSession().then(({ data }) => {
+    setUser(data?.session?.user ?? null);
+    setLoading(false); // ✅ stop loading once we checked session
+  });
 
+  const subscription = onAuthStateChange((user) => {
+    setUser(user);
+    setLoading(false); // ✅ stop loading on auth change too
+  });
+
+  return () => {
+    if (subscription) subscription.unsubscribe();
+  };
+}, []);
+
+// Restore account state from localStorage
+useEffect(() => {
+  const saved = loadAccountState();
+  if (saved) {
+    if (saved.capital !== undefined) setCapital(saved.capital);
+    if (saved.theme) setTheme(saved.theme);
+    if (saved.depositAmount !== undefined) setDepositAmount(saved.depositAmount);
+    if (saved.withdrawAmount !== undefined) setWithdrawAmount(saved.withdrawAmount);
+    if (saved.userSettings) setUserSettings(saved.userSettings);
+  }
+}, []);
+
+useEffect(() => {
+  persistAccountState();
+}, [capital, theme, depositAmount, withdrawAmount, userSettings]);
+
+
+
+  
     const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
     const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
     const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
-// --- Firebase Auth State Listener ---
+    const journalPath = `artifacts/${appId}/users/${userId}/tradingJournal`;
+    const journalDocRef = db ? doc(db, journalPath, "data") : null;
 
+// ------------------ Local persistence helpers ------------------
 
-useEffect(() => {
-  // Initialize current user
-  (async () => {
-    try {
-      const { data: { user }, error } = await supabase.auth.getUser();
-      if (error) {
-        console.error("getUser error:", error);
-      } else if (user) {
-        setUserId(user.id);
-        // optional: upsert user record
-        const { error: upErr } = await supabase
-          .from("users")
-          .upsert({ id: user.id, last_seen: new Date() });
-        if (upErr) console.error("Upsert user error:", upErr);
-      }
-    } catch (e) {
-      console.error("getUser exception:", e);
-    } finally {
-      setLoading(false);
-    }
-  })();
+// ------------------ Local persistence helpers ------------------
 
-  // subscribe to auth changes
-  const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-    if (session?.user) {
-      setUserId(session.user.id);
-    } else {
-      setUserId(null);
-    }
-    setLoading(false);
-  });
+// Keys (scoped per user)
+const tradingKey = (uid) => `tradingJournal:${uid}`;
+const accountKey = (uid) => `accountState:${uid}`;
+const userSettingsKey = (uid) => `userSettings:${uid}`;
 
-  return () => {
-    try { subscription?.unsubscribe?.(); } catch (e) { /* ignore */ }
-  };
-}, []);
+// Persist trades/journal
+const persistJournal = async (openTrades, historyTrades, accountType) => {
+  if (!userId) return;
 
+  // local fallback
+  localStorage.setItem(tradingKey(userId), JSON.stringify({
+    tradesOpen: openTrades || [],
+    tradesHistory: historyTrades || [],
+    accountType: accountType ?? userSettings?.accountType ?? null,
+    savedAt: new Date().toISOString(),
+  }));
 
+  // supabase sync
+  const { error } = await supabase
+    .from('trading_journals')
+    .upsert({
+      user_id: userId,
+      trades_open: openTrades || [],
+      trades_history: historyTrades || [],
+      account_type: accountType ?? userSettings?.accountType ?? null,
+      updated_at: new Date().toISOString()
+    });
 
-const loadTrades = async () => {
-  if (!userId) {
-    setTradesOpen([]);
-    setTradesHistory([]);
-    return;
-  }
-
-  const { data, error } = await supabase
-    .from("trades")
-    .select("*")
-    .eq("user_id", userId)
-    .order("created_at", { ascending: false });
-
-  if (error) {
-    console.error("loadTrades error:", error);
-    return;
-  }
-
-  const normalized = (data || []).map(normalizeTradeRow);
-  setTradesOpen(normalized.filter(t => t.status === "open" || t.status === "active"));
-  setTradesHistory(normalized.filter(t => t.status === "closed"));
+  if (error) console.error("Failed to save to Supabase:", error);
 };
 
+// Load trades/journal
+const loadLocalJournal = (uid) => {
+  try {
+    const raw = localStorage.getItem(tradingKey(uid));
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    console.error("Failed to load local journal:", err);
+    return null;
+  }
+};
+
+// Persist account + settings
+const persistAccountState = () => {
+  if (!userId) return;
+
+  try {
+    const data = {
+      capital,
+      theme,
+      depositAmount,
+      withdrawAmount,
+      userSettings,
+      savedAt: new Date().toISOString(),
+    };
+    localStorage.setItem(accountKey(userId), JSON.stringify(data));
+    if (userSettings) {
+      localStorage.setItem(userSettingsKey(userId), JSON.stringify(userSettings));
+    }
+  } catch (err) {
+    console.error("Failed to persist account state:", err);
+  }
+};
+
+// Load account + settings
+const loadAccountState = (uid) => {
+  try {
+    const raw = localStorage.getItem(accountKey(uid));
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    console.error("Failed to load account state:", err);
+    return null;
+  }
+};
+
+// ------------------ end local helpers ------------------
+
+
+// --- Hydrate state from localStorage when userId changes ---
 useEffect(() => {
   if (!userId) return;
 
-  const channel = supabase
-    .channel("trades-realtime")
-    .on(
-      "postgres_changes",
-      { event: "*", schema: "public", table: "trades", filter: `user_id=eq.${userId}` },
-      (payload) => {
-        console.log("Realtime change:", payload);
-        loadTrades(); // simply refetch trades after any insert/update/delete
-      }
-    )
-    .subscribe();
+  const loadSupabaseJournal = async () => {
+    const { data, error } = await supabase
+      .from('trading_journals')
+      .select('*')
+      .eq('user_id', userId)
+      .single();
 
-  return () => {
-    supabase.removeChannel(channel);
+    if (data) {
+      setTradesOpen(data.trades_open || []);
+      setTradesHistory(data.trades_history || []);
+    } else if (error) {
+      console.error("Supabase load error:", error);
+    }
   };
+
+  loadSupabaseJournal();
 }, [userId]);
 
 
-
-
 // --- Real-time Data Listener with onSnapshot ---
-// ✅ New Supabase code
 useEffect(() => {
-  // Initialize current user
-  (async () => {
-    try {
-      const { data: { user }, error } = await supabase.auth.getUser();
-      if (error) {
-        console.error("getUser error:", error);
-      } else if (user) {
-        setUserId(user.id);
-        // ✅ Upsert user record (with email + last_seen)
-        const { error: upErr } = await supabase
-          .from("users")
-          .upsert({
-            id: user.id,
-            email: user.email,
-            last_seen: new Date(),
-          });
-        if (upErr) console.error("Upsert user error:", upErr);
-      }
-    } catch (e) {
-      console.error("getUser exception:", e);
-    } finally {
-      setLoading(false);
-    }
-  })();
+  if (!journalDocRef || !userId) return;
 
-  // Subscribe to auth changes
-  const { data: { subscription } } = supabase.auth.onAuthStateChange(
-    async (_event, session) => {
-      if (session?.user) {
-        setUserId(session.user.id);
-        // ✅ Keep user row updated on auth changes
-        const { error: upErr } = await supabase
-          .from("users")
-          .upsert({
-            id: session.user.id,
-            email: session.user.email,
-            last_seen: new Date(),
-          });
-        if (upErr) console.error("Upsert user error:", upErr);
+  const unsubscribe = onSnapshot(
+    journalDocRef,
+    (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setTradesOpen(data.tradesOpen || []);
+        setTradesHistory(data.tradesHistory || []);
       } else {
-        setUserId(null);
+        // Remote empty → fallback to local if available
+        const local = loadLocalJournal(userId);
+        if (local) {
+          setTradesOpen(local.tradesOpen || []);
+          setTradesHistory(local.tradesHistory || []);
+        } else {
+          setTradesOpen([]);
+          setTradesHistory([]);
+        }
       }
-      setLoading(false);
-    }
+    },
+    (error) => console.error("Error listening to document:", error)
   );
 
-  return () => {
-    try {
-      subscription?.unsubscribe?.();
-    } catch (e) {
-      /* ignore */
-    }
-  };
-}, []);
+  return () => unsubscribe();
+}, [journalDocRef, userId]);
 
+
+// --- One-time migration: ensure session/strategy fields ---
+useEffect(() => {
+  try {
+    if (!tradesHistory || tradesHistory.length === 0) return;
+
+    const needsPatch = tradesHistory.some(
+      (t) => t.session === undefined || t.strategy === undefined
+    );
+    if (!needsPatch) return;
+
+    const patched = tradesHistory.map((t) => ({
+      ...t,
+      session: t.session ?? "",
+      strategy: t.strategy ?? "",
+    }));
+
+    setTradesHistory(patched);
+    persistJournal(tradesOpen, patched).catch(console.error);
+    if (journalDocRef) {
+      setDoc(journalDocRef, { tradesOpen, tradesHistory: patched }).catch(console.error);
+    }
+
+    localStorage.setItem("tradingJournal:migrated_session_strategy_v1", "1");
+  } catch (e) {
+    console.error("Migration failed:", e);
+  }
+}, []); // run once
 
 
     // --- State Management ---
-    const [formData, setFormData] = useState({
-        accountType: "Mini",
-        pair: "",
-        type: "long",
-        entryDate: new Date().toISOString().slice(0, 10),
-        price: "",
-        sl: "",
-        tp: "",
-        risk: "2.0",
-        beforeImage: null,   // 👈 new
-    });
+const [formData, setFormData] = useState({
+  pair: "",
+  type: "long",
+  entryDate: "",
+  price: "",
+  sl: "",
+  tp: "",
+  risk: "2.0",
+  session: "",
+  strategy: "",
+  beforeImage: "",
+});
+
     const [modalAfterImage, setModalAfterImage] = useState(null); // 👈 new for close order
     const [tradesOpen, setTradesOpen] = useState([]);
     const [tradesHistory, setTradesHistory] = useState([]);
+    const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+    const [tradeToDeleteId, setTradeToDeleteId] = useState(null);
+
     const [activeTab, setActiveTab] = useState("dashboard");
 
     const [modalOpen, setModalOpen] = useState(false);
@@ -546,6 +626,10 @@ useEffect(() => {
     const [errorMessage, setErrorMessage] = useState("");
 
     const [selectedWeek, setSelectedWeek] = useState(getWeekNumber(new Date()));
+    // Dashboard sidebar view state
+const [dashboardView, setDashboardView] = useState("overview");
+
+
 
     const PER_TRADE_LIMIT_PERCENT = 3;
     const DAILY_RISK_LIMIT_PERCENT = 5;
@@ -607,6 +691,55 @@ useEffect(() => {
             cancelTrades: totalCancel,
         };
     }, [tradesHistory, tradesOpen, formData.entryDate]);
+const transactionsData = useMemo(() => {
+  const txns = [];
+
+  // ✅ Starting Capital is always first
+  if (userSettings?.startingCapital && userSettings.startingCapital > 0) {
+    txns.push({
+      date: userSettings.startDate || tradesHistory[0]?.exitDate || new Date(),
+      type: "Starting Capital",
+      amount: userSettings.startingCapital,
+    });
+  }
+
+  // Deposits
+  (deposits || []).forEach((d) => {
+    txns.push({
+      date: d.date,
+      type: "Deposit",
+      amount: d.amount,
+    });
+  });
+
+  // Withdrawals
+  (withdrawals || []).forEach((w) => {
+    txns.push({
+      date: w.date,
+      type: "Withdrawal",
+      amount: -Math.abs(w.amount),
+    });
+  });
+
+  // Daily Profit/Loss
+  const dailyPnL = {};
+  tradesHistory.forEach((t) => {
+    const day = new Date(t.exitDate).toLocaleDateString("en-CA");
+    if (!dailyPnL[day]) dailyPnL[day] = 0;
+    dailyPnL[day] += t.pnlCurrency ?? 0;
+  });
+
+  Object.entries(dailyPnL).forEach(([date, pnl]) => {
+    txns.push({
+      date,
+      type: pnl >= 0 ? "Daily Profit" : "Daily Loss",
+      amount: pnl,
+    });
+  });
+
+  // Sort by date
+  return txns.sort((a, b) => new Date(a.date) - new Date(b.date));
+}, [tradesHistory, deposits, withdrawals, userSettings]);
 
     // --- Helpers for Calculations ---
     const getMultiplier = (pair) => {
@@ -625,24 +758,38 @@ useEffect(() => {
         if (accountType.toLowerCase() === "micro") return base / 100;
         return base;
     };
+// ✅ Lot Size Calculator Logic
+const calcLotSize = useMemo(() => {
+  if (!calcPair || calcPoints <= 0 || !capital) return 0;
+  const vp = getAdjustedVP(calcPair, calcAccountType); // 👈 now respects account type
+  if (!vp) return 0;
+  return ((calcRiskPercent / 100) * capital) / (vp * calcPoints);
+}, [calcPair, calcPoints, calcRiskPercent, calcAccountType, capital]);
 
-    const calculateStopLossPoints_live = (fd = formData) => {
-        const entry = parseNumber(fd.price);
-        const stop = parseNumber(fd.sl);
-        if (!entry || !stop || !fd.pair) return 0;
-        const raw = fd.type === "long" ? entry - stop : stop - entry;
-        const mult = getMultiplier(fd.pair);
-        return Math.round(raw * mult);
-    };
+const calcRiskAmount = useMemo(() => {
+  return (calcRiskPercent / 100) * capital;
+}, [calcRiskPercent, capital]);
 
-    const calculateTakeProfitPoints_live = (fd = formData) => {
-        const entry = parseNumber(fd.price);
-        const take = parseNumber(fd.tp);
-        if (!entry || !take || !fd.pair) return 0;
-        const raw = fd.type === "long" ? take - entry : entry - take;
-        const mult = getMultiplier(fd.pair);
-        return Math.round(raw * mult);
-    };
+// --- REPLACE these two functions with the versions below ---
+
+const calculateStopLossPoints_live = (fd = formData) => {
+  const entry = parseNumber(fd.price);
+  const stop = parseNumber(fd.sl);
+  if (!entry || !stop || !fd.pair) return 0;
+  const raw = fd.type === "long" ? entry - stop : stop - entry;
+  const mult = getMultiplier(fd.pair);
+  return Math.round(Math.abs(raw) * mult);
+};
+
+const calculateTakeProfitPoints_live = (fd = formData) => {
+  const entry = parseNumber(fd.price);
+  const take = parseNumber(fd.tp);
+  if (!entry || !take || !fd.pair) return 0;
+  const raw = fd.type === "long" ? take - entry : entry - take;
+  const mult = getMultiplier(fd.pair);
+  return Math.round(Math.abs(raw) * mult);
+};
+
 
     const calculateLotSize_live = (fd = formData) => {
         const pair = fd.pair;
@@ -673,16 +820,23 @@ useEffect(() => {
         setFormData((prev) => ({ ...prev, [name]: value }));
     };
 
-  const handleSaveTrade = async (e) => {
-  e?.preventDefault?.();
+const handleSaveTrade = async (e) => {
+  e && e.preventDefault && e.preventDefault();
 
   const currentDateSummary = summaryForSelectedDate;
   const newTradeRisk = parseNumber(formData.risk);
 
   // ✅ Daily trade limits check (date-based)
+  const safeISO = (d) => {
+    if (!d && d !== 0) return "";
+    const parsed = new Date(d);
+    if (isNaN(parsed)) return String(d);
+    return parsed.toISOString().slice(0, 10);
+  };
+
   const tradesForDate = [
     ...tradesOpen.filter(t => t.entryDate === formData.entryDate),
-    ...tradesHistory.filter(t => t.entryDate === formData.entryDate),
+    ...tradesHistory.filter(t => t.entryDate === formData.entryDate)
   ];
 
   const activeCount = tradesForDate.filter(t => t.status === "open" || t.status === "active").length;
@@ -705,26 +859,30 @@ useEffect(() => {
     return;
   }
 
-  // ✅ Per-trade risk check
+  // Risk per trade check
   if (newTradeRisk > PER_TRADE_LIMIT_PERCENT) {
-    setErrorMessage(`Error: Per-trade risk limit of ${PER_TRADE_LIMIT_PERCENT}% exceeded.`);
+    setErrorMessage(
+      `Error: Per-trade risk limit of ${PER_TRADE_LIMIT_PERCENT}% exceeded.`
+    );
     setShowErrorModal(true);
     return;
   }
 
-  // ✅ Daily risk check
+  // Daily risk check
   const newDailyRisk = currentDateSummary.riskUsed + newTradeRisk;
   if (newDailyRisk > DAILY_RISK_LIMIT_PERCENT) {
-    setErrorMessage(`Error: Daily risk limit of ${DAILY_RISK_LIMIT_PERCENT}% for ${formData.entryDate} exceeded.`);
+    setErrorMessage(
+      `Error: Daily risk limit of ${DAILY_RISK_LIMIT_PERCENT}% for ${formData.entryDate} exceeded.`
+    );
     setShowErrorModal(true);
     return;
   }
 
-  // ✅ Lot size + value per pip
+  // Lot size + value per pip
   const lot = calculateLotSize_live(formData);
   const vpAtSave = getAdjustedVP(formData.pair, formData.accountType);
 
-  // ✅ Entry, SL, TP
+  // Entry, SL, TP
   const entry = parseNumber(formData.price);
   const sl = parseNumber(formData.sl);
   const tp = parseNumber(formData.tp);
@@ -745,66 +903,61 @@ useEffect(() => {
     ? String(formData.beforeImage).trim()
     : null;
 
-  // ✅ Build trade object (snake_case for DB)
-  const trade = {
-    account_type: formData.accountType,
-    pair: formData.pair,
-    type: formData.type,
-    entry_date: formData.entryDate,
-    entry_price: parseNumber(formData.price),
-    sl: parseNumber(formData.sl),
-    tp: parseNumber(formData.tp),
-    risk: parseNumber(formData.risk),
-    lot_size: Number(lot.toFixed(4)),
-    value_per_pip: vpAtSave,
-    status: "open",
-    ratio,
-    before_image: before,
-    created_at: new Date().toISOString(), // you can drop this if DB has default now()
-    session,
-    user_id: userId,
-  };
-
-  try {
-    // Insert & return row
-    const { data, error } = await supabase
-      .from("trades")
-      .insert([trade])
-      .select()
-      .single();
-
-    if (error) {
-      console.error("Error saving trade:", error);
-      setErrorMessage("Failed to save trade.");
-      setShowErrorModal(true);
-      return;
-    }
-
-    const normalized = normalizeTradeRow(data);
-
-    // Add to open trades list immediately
-    setTradesOpen(prev => [normalized, ...prev]);
-
-    // Reset form
-    setFormData({
-      accountType: "Mini",
-      pair: "",
-      type: "long",
-      entryDate: new Date().toISOString().slice(0, 10),
-      price: "",
-      sl: "",
-      tp: "",
-      risk: "2.0",
-      beforeImage: null,
-    });
-  } catch (err) {
-    console.error("Insert exception:", err);
-    setErrorMessage("Failed to save trade.");
-    setShowErrorModal(true);
-  }
+  // ✅ Build new trade object
+// ✅ Build new trade object (fixed)
+const trade = {
+  id: Date.now().toString(), // unique ID
+  pair: formData.pair,
+  type: formData.type,
+  entryDate: formData.entryDate || new Date().toISOString().slice(0, 10),
+  entryPrice: parseFloat(formData.price),
+  stopLoss: parseFloat(formData.sl),
+  takeProfit: parseFloat(formData.tp),
+  risk: parseFloat(formData.risk),
+  lotSize: liveLotSize,
+  // store the adjusted VP (respecting accountType e.g. Mini/Micro)
+  valuePerPip: Number(vpAtSave) || 0,
+  ratio:
+    liveStopLossPoints !== 0
+      ? fmt2(liveTakeProfitPoints / liveStopLossPoints)
+      : null,
+  beforeImage: formData.beforeImage?.trim() || null,
+  session: formData.session || "",
+  strategy: formData.strategy || "",
+  status: "active",
 };
 
 
+  // Update state
+const updatedTradesOpen = [...tradesOpen, trade];
+  setTradesOpen(updatedTradesOpen);
+  await persistJournal(updatedTradesOpen, tradesHistory);
+  // Save to Firestore
+  if (journalDocRef) {
+    try {
+      await setDoc(journalDocRef, {
+        tradesOpen: updatedTradesOpen,
+        tradesHistory,
+      });
+    } catch (e) {
+      console.error("Error writing document:", e);
+    }
+  }
+
+  // Reset form
+ setFormData({
+    pair: "",
+    type: "long",
+    entryDate: "",
+    price: "",
+    sl: "",
+    tp: "",
+    risk: "2.0",
+    beforeImage: "",
+    session: "",   // reset
+    strategy: "",  // reset
+  });
+};
 
 
     const openCloseModal = (tradeId) => {
@@ -818,40 +971,93 @@ useEffect(() => {
         setModalOpen(true);
     };
 
-const computeExpectedCurrencyForClose = (trade, exitPrice) => {
+ const computeExpectedCurrencyForClose = (trade, exitPrice) => {
   if (!trade || exitPrice === "" || exitPrice === null || exitPrice === undefined) return 0;
   const exit = parseNumber(exitPrice);
-  const entry = parseNumber(trade.entryPrice ?? trade.entry_price ?? trade.price ?? 0);
+  const entry = parseNumber(trade.entryPrice ?? trade.price ?? 0);
   const mult = getMultiplier(trade.pair);
   const pointsSigned = trade.type === "long" ? (exit - entry) * mult : (entry - exit) * mult;
-  const lot = Number(trade.lotSize ?? trade.lot_size) || 0;
-  const vpp = Number(trade.valuePerPip ?? trade.value_per_pip) || 0;
+  const lot = Number(trade.lotSize) || 0;
+  const vpp = Number(trade.valuePerPip) || 0;
   const expectedCurrency = lot * vpp * pointsSigned;
-  return Number(expectedCurrency.toFixed(2));
+  return Number(expectedCurrency);
 };
 
+// ====== Paste this block directly ABOVE the `const weeklyDailyRiskData = useMemo(...)` you searched for ======
+
+/* --- dailyRiskData (declare FIRST) --- */
+const dailyRiskData = useMemo(() => {
+  // combine history + open trades (fixed spread)
+  const allTrades = [...tradesHistory, ...tradesOpen];
+
+  const dailyRiskMap = allTrades.reduce((acc, trade) => {
+    const date = trade.entryDate ? trade.entryDate.slice(0,10) : (new Date()).toISOString().slice(0,10);
+    if (!acc[date]) acc[date] = 0;
+    // count risk for open/active trades (adjust if you want to include closed trades)
+    if (trade.status === "open" || trade.status === "active") {
+      acc[date] += Number(trade.risk || 0);
+    }
+    return acc;
+  }, {});
+
+  // Convert map -> sorted array for chart
+  const sortedDates = Object.keys(dailyRiskMap).sort((a, b) => new Date(a) - new Date(b));
+  return sortedDates.map(date => ({
+    date,
+    risk: Number(dailyRiskMap[date].toFixed(2)),
+    dailyLimit: DAILY_RISK_LIMIT_PERCENT
+  }));
+}, [tradesHistory, tradesOpen]);
+
+/* --- weeklyDailyRiskData (depends on dailyRiskData) --- */
+const weeklyDailyRiskData = useMemo(() => {
+  if (!dailyRiskData || dailyRiskData.length === 0) return [];
+  return dailyRiskData
+    .filter(item => getWeekNumber(new Date(item.date)) === selectedWeek)
+    .sort((a, b) => new Date(a.date) - new Date(b.date));
+}, [dailyRiskData, selectedWeek]);
+console.log("weeklyDailyRiskData (for selectedWeek):", selectedWeek, weeklyDailyRiskData);
+
+/* --- riskDomain (compute AFTER weeklyDailyRiskData) --- */
+const riskDomain = useMemo(() => {
+  if (!weeklyDailyRiskData || weeklyDailyRiskData.length === 0) {
+    return [0, DAILY_RISK_LIMIT_PERCENT];
+  }
+  const values = weeklyDailyRiskData.map(d => d.risk);
+  const min = Math.min(...values);
+  const max = Math.max(...values, DAILY_RISK_LIMIT_PERCENT);
+  return [Math.max(0, Math.floor(min - 1)), Math.ceil(max + 1)];
+}, [weeklyDailyRiskData, DAILY_RISK_LIMIT_PERCENT]);
+
+// ====== End paste block ======
 
 
 const handleSaveClose = async () => {
   const trade = tradesOpen.find((t) => t.id === selectedTradeId);
-  if (!trade) {
-    setErrorMessage("Selected trade not found.");
-    setShowErrorModal(true);
-    return;
-  }
+  if (!trade) return;
 
   const exitPriceNum = parseNumber(modalExitPrice);
-  const actualPnLNum = parseNumber(modalActualPnL);
+  const manualPnLNum = parseNumber(modalActualPnL); // optional manual override
   const exitDate = modalExitDate || new Date().toISOString().slice(0, 10);
 
   const mult = getMultiplier(trade.pair);
-  const pointsSigned =
-    trade.type === "long"
-      ? Math.round((exitPriceNum - trade.entryPrice) * mult)
-      : Math.round((trade.entryPrice - exitPriceNum) * mult);
 
-  const pnlPercent = capital ? (actualPnLNum / capital) * 100 : 0;
+  // always compute raw distance
+  const rawPoints = (exitPriceNum - trade.entryPrice) * mult;
 
+  // signed points based on trade type
+  const pointsSigned = trade.type === "long" ? Math.round(rawPoints) : Math.round(-rawPoints);
+
+  // compute PnL in currency
+  const computedPnL = pointsSigned * trade.lotSize * trade.valuePerPip;
+
+  // if user entered an override PnL, respect it, otherwise use computed
+  const pnlCurrency = isNaN(manualPnLNum) ? computedPnL : manualPnLNum;
+
+  // % PnL
+  const pnlPercent = capital ? (pnlCurrency / capital) * 100 : 0;
+
+  // ✅ Validate URLs
   const before =
     trade.beforeImage && isValidUrl(trade.beforeImage)
       ? String(trade.beforeImage).trim()
@@ -862,58 +1068,61 @@ const handleSaveClose = async () => {
       ? String(modalAfterImage).trim()
       : null;
 
-  // ✅ Build closed trade object (snake_case for Supabase)
+  // ✅ Build closed trade
   const closed = {
-    exit_date: exitDate,
-    exit_price: exitPriceNum,
+    id: trade.id,
+    pair: trade.pair,
+    type: trade.type,
+    entryDate: trade.entryDate,
+    entryPrice: trade.entryPrice,
+    exitDate,
+    exitPrice: exitPriceNum,
+    lotSize: trade.lotSize,
+    valuePerPip: trade.valuePerPip,
     points: pointsSigned,
-    pnl_percent: pnlPercent,
-    pnl_currency: actualPnLNum,
-    status: "closed",
-    before_image: before,
-    after_image: after,
-    closed_at: new Date().toISOString(),
+    pnlPercent,
+    pnlCurrency,
+    status: modalStatus,
+    risk: trade.risk,
+    stopLoss: trade.stopLoss ?? trade.sl ?? null,
+    takeProfit: trade.takeProfit ?? trade.tp ?? null,
+    ratio: trade.ratio ?? null,
+    beforeImage: before,
+    afterImage: after,
+    note: closeNote,
+    // preserve these so the More modal can show them
+    session: trade.session ?? "",
+    strategy: trade.strategy ?? "",
   };
 
-  try {
-    if (userId && trade.id) {
-      // Update in DB and return updated row
-      const { data, error } = await supabase
-        .from("trades")
-        .update(closed)
-        .eq("id", trade.id)
-        .eq("user_id", userId)
-        .select()
-        .single();
+  // Update states
+  const updatedTradesOpen = tradesOpen.filter((t) => t.id !== trade.id);
+  const updatedTradesHistory = [...tradesHistory, closed];
+  setTradesOpen(updatedTradesOpen);
+  setTradesHistory(updatedTradesHistory);
+  await persistJournal(updatedTradesOpen, updatedTradesHistory);
 
-      if (error) {
-        console.error("Error closing trade:", error);
-        setErrorMessage("Failed to close trade.");
-        setShowErrorModal(true);
-      } else if (data) {
-        const normalized = normalizeTradeRow(data);
-        // ✅ Move from open → history in UI
-        setTradesOpen((prev) => prev.filter((t) => t.id !== trade.id));
-        setTradesHistory((prev) => [normalized, ...prev]);
-      }
-    } else {
-      console.warn("⚠ Missing userId or trade.id, skipping Supabase update");
+  // ✅ Persist to Firestore (optional remote sync)
+  if (journalDocRef) {
+    try {
+      await setDoc(journalDocRef, {
+        tradesOpen: updatedTradesOpen,
+        tradesHistory: updatedTradesHistory,
+      });
+    } catch (e) {
+      console.error("Error updating document:", e);
     }
-  } catch (e) {
-    console.error("Error updating trade:", e);
-    setErrorMessage("Failed to close trade.");
-    setShowErrorModal(true);
   }
 
-  // ✅ Reset modal only (UI state)
+  // Close modal + reset
   setModalOpen(false);
   setSelectedTradeId(null);
   setModalExitDate("");
   setModalExitPrice("");
   setModalActualPnL("");
   setModalStatus("active");
+  setCloseNote(""); // ✅ clear note after saving
 };
-
 
 
 
@@ -925,72 +1134,57 @@ const handleSaveEditedTrade = async () => {
 
   try {
     const exitPriceNum = parseNumber(editingTrade.exitPrice);
-    const entryPriceNum = parseNumber(
-      editingTrade.entryPrice ?? editingTrade.price ?? 0
-    );
+    const entryPriceNum = parseNumber(editingTrade.entryPrice ?? editingTrade.price ?? 0);
     const mult = getMultiplier(editingTrade.pair);
 
-    // ✅ Same points logic as handleSaveClose
-    const points =
-      editingTrade.type === "long"
-        ? Math.round((exitPriceNum - entryPriceNum) * mult)
-        : Math.round((entryPriceNum - exitPriceNum) * mult);
+    // ✅ Consistent points logic
+    const rawPoints = (exitPriceNum - entryPriceNum) * mult;
+    const pointsSigned = editingTrade.type === "long"
+      ? Math.round(rawPoints)
+      : Math.round(-rawPoints);
 
-    // ✅ Same PnL logic as handleSaveClose
-    const pnlCurrency = Number(
-      (editingTrade.lotSize * editingTrade.valuePerPip * points).toFixed(2)
-    );
-    const pnlPercent = capital
-      ? Number(((pnlCurrency / capital) * 100).toFixed(2))
-      : 0;
+    // ✅ Consistent PnL logic
+    const pnlCurrency = Number((pointsSigned * editingTrade.lotSize * editingTrade.valuePerPip).toFixed(2));
+    const pnlPercent = capital ? Number(((pnlCurrency / capital) * 100).toFixed(2)) : 0;
 
-    // ✅ Build updated trade object with snake_case fields
     const updatedTrade = {
-      exit_price: exitPriceNum,
-      exit_date: editingTrade.exitDate,
-      points,
-      pnl_currency: pnlCurrency,
-      pnl_percent: pnlPercent,
-      session: editingTrade.session || null,
+      ...editingTrade,
+      exitPrice: exitPriceNum,
+      exitDate: editingTrade.exitDate,
+      points: pointsSigned,
+      pnlCurrency,
+      pnlPercent,
+      session: editingTrade.session ?? "",
+      strategy: editingTrade.strategy ?? "",
     };
 
-    // ✅ Update local state (camelCase stays in React state)
-    setTradesHistory((prev) =>
-      prev.map((t) =>
-        t.id === editingTrade.id ? { ...t, ...updatedTrade } : t
-      )
+    // ✅ Update tradesHistory
+    const updatedTradesHistory = tradesHistory.map(t =>
+      t.id === updatedTrade.id ? updatedTrade : t
     );
-    setTradesOpen((prev) =>
-      prev.map((t) =>
-        t.id === editingTrade.id ? { ...t, ...updatedTrade } : t
-      )
-    );
+    setTradesHistory(updatedTradesHistory);
 
-    // ✅ Update in Supabase
-    const { error } = await supabase
-      .from("trades")
-      .update(updatedTrade)
-      .eq("id", editingTrade.id)
-      .eq("user_id", userId);
+    // ✅ Persist journal (use tradesOpen, not undefined updatedTradesOpen)
+    await persistJournal(tradesOpen, updatedTradesHistory, formData.accountType);
 
-    if (error) {
-      console.error("Error saving edited trade:", error);
-      setErrorMessage("Failed to update trade.");
-      setShowErrorModal(true);
-      return;
+    // ✅ Persist changes to Firestore
+    if (journalDocRef) {
+      await setDoc(journalDocRef, {
+        tradesOpen,
+        tradesHistory: updatedTradesHistory,
+      });
     }
 
     // ✅ Close modal after save
     setIsEditModalOpen(false);
     setEditingTrade(null);
+
   } catch (err) {
     console.error("Error saving edited trade:", err);
     setErrorMessage("Failed to update trade.");
     setShowErrorModal(true);
   }
 };
-
-
 
 
 // ✅ Open the edit modal for a trade
@@ -1002,32 +1196,29 @@ const handleEditTrade = (trade) => {
 
 // ✅ Delete a trade from history
 const handleDeleteTrade = async (tradeId) => {
-  console.log("Deleting trade:", tradeId);
-
   try {
-    // ✅ Update local state first (optimistic update)
-    setTradesHistory((prev) => prev.filter((t) => t.id !== tradeId));
-    setTradesOpen((prev) => prev.filter((t) => t.id !== tradeId));
+    // Remove from history
+    const updatedTradesHistory = tradesHistory.filter(t => t.id !== tradeId);
 
-    // ✅ Delete specific trade row in Supabase
-    const { error } = await supabase
-      .from("trades")
-      .delete()
-      .eq("id", tradeId)
-      .eq("user_id", userId);
+    // Keep open trades unchanged
+    const updatedTradesOpen = [...tradesOpen];
 
-    if (error) {
-      console.error("Error deleting trade:", error);
-      setErrorMessage("Failed to delete trade.");
-      setShowErrorModal(true);
-      return;
+    // Update UI
+    setTradesHistory(updatedTradesHistory);
+
+    // Persist locally & remotely
+    await persistJournal(updatedTradesOpen, updatedTradesHistory);
+
+    if (journalDocRef) {
+      await setDoc(journalDocRef, {
+        tradesOpen: updatedTradesOpen,
+        tradesHistory: updatedTradesHistory
+      });
     }
 
-    // ✅ Close edit modal if open
+    // Clean up editing state if needed
     setIsEditModalOpen(false);
     setEditingTrade(null);
-
-    console.log("✅ Trade successfully deleted:", tradeId);
   } catch (err) {
     console.error("Error deleting trade:", err);
     setErrorMessage("Failed to delete trade.");
@@ -1122,124 +1313,240 @@ const handleDeleteTrade = async (tradeId) => {
     }, [tradesHistory, tradesOpen, capital]);
 
     // Memoized data for the weekly equity growth chart
-    const equityChartData = useMemo(() => {
-        const allTrades = [...tradesHistory, ...tradesOpen];
-        return processWeeklyEquityData(allTrades);
-    }, [tradesHistory, tradesOpen]);
+ const equityChartData = useMemo(() => {
+  const allTrades = [...tradesHistory, ...tradesOpen];
+  return processWeeklyEquityData(allTrades, capital); // <-- pass current capital
+}, [tradesHistory, tradesOpen, capital]);
 
-    // Memoized data for the daily risk chart
-    const dailyRiskData = useMemo(() => {
-        const allTrades = [...tradesHistory, ...tradesOpen];
-        const dailyRiskMap = allTrades.reduce((acc, trade) => {
-            const date = trade.entryDate;
-            if (!acc[date]) {
-                acc[date] = 0;
-            }
-            if (trade.status === 'open' || trade.status === 'active') {
-                acc[date] += trade.risk;
-            }
-            return acc;
-        }, {});
-        // Convert the map to an array of objects for the chart
-        const sortedDates = Object.keys(dailyRiskMap).sort((a, b) => new Date(a) - new Date(b));
-        return sortedDates.map(date => ({
-            date,
-            risk: Number(dailyRiskMap[date].toFixed(2)),
-            dailyLimit: DAILY_RISK_LIMIT_PERCENT
-        }));
-    }, [tradesHistory, tradesOpen]);
-            // --- Weekly view: filter dailyRiskData to only dates inside the selected week
-const weeklyDailyRiskData = useMemo(() => {
-  if (!dailyRiskData || dailyRiskData.length === 0) return [];
 
-  // Keep only entries whose week number matches the selectedWeek
-  return dailyRiskData
-    .filter(item => {
-      const d = new Date(item.date);
-      return getWeekNumber(d) === selectedWeek;
-    })
-    .sort((a, b) => new Date(a.date) - new Date(b.date));
-}, [dailyRiskData, selectedWeek]);
-
-console.log("weeklyDailyRiskData (for selectedWeek):", selectedWeek, weeklyDailyRiskData);
-
+ 
+// --- Weekly Review Calculations ---
 // --- Weekly Review Calculations ---
 const weeklyReviewData = useMemo(() => {
-    const weeks = {};
-    let runningEquity = capital;
+  const weeks = {};
+  let runningEquity = capital;
 
-    // Sort trades by exit date to calculate cumulative equity correctly
-    const sortedHistory = [...tradesHistory].sort((a, b) => new Date(a.exitDate) - new Date(b.exitDate));
+  // Sort trades by exit date
+  const sortedHistory = [...tradesHistory].sort(
+    (a, b) => new Date(a.exitDate) - new Date(b.exitDate)
+  );
 
-    // First pass: calculate all weekly stats and a running equity for each trade
-    const tradesWithEquity = sortedHistory.map(trade => {
-        runningEquity += trade.pnlCurrency;
-        return {
-            ...trade,
-            week: getWeekNumber(new Date(trade.exitDate)),
-            dayOfWeek: new Date(trade.exitDate).getDay(),
-            equityAfter: runningEquity
-        };
-    });
+  // Attach week + equity info
+  const tradesWithEquity = sortedHistory.map((trade) => {
+    runningEquity += trade.pnlCurrency;
+    return {
+      ...trade,
+      week: getWeekNumber(new Date(trade.exitDate)),
+      dayOfWeek: new Date(trade.exitDate).getDay(),
+      equityAfter: runningEquity,
+    };
+  });
 
-    // Second pass: group by week and calculate weekly stats
-    tradesWithEquity.forEach(trade => {
-        const week = trade.week;
-        if (!weeks[week]) {
-            weeks[week] = {
-                trades: [],
-                totalPnL: 0,
-                weeklyPnLPercent: 0,
-                wins: 0,
-                losses: 0,
-                breakeven: 0,
-                startEquity: 0,
-                endEquity: 0
-            };
-        }
-        weeks[week].trades.push(trade);
-    });
-
-    // Final calculations for each week
-    let lastWeekEquity = capital;
-    for (let i = 1; i <= 52; i++) {
-        if (weeks[i]) {
-            weeks[i].startEquity = lastWeekEquity;
-            weeks[i].totalPnL = weeks[i].trades.reduce((sum, t) => sum + t.pnlCurrency, 0);
-            weeks[i].weeklyPnLPercent = (weeks[i].totalPnL / capital) * 100;
-            weeks[i].wins = weeks[i].trades.filter(t => classifyTrade(t, capital) === "win").length;
-            weeks[i].losses = weeks[i].trades.filter(t => classifyTrade(t, capital) === "loss").length;
-            weeks[i].breakeven = weeks[i].trades.filter(t => classifyTrade(t, capital) === "breakeven").length;
-            weeks[i].endEquity = weeks[i].startEquity + weeks[i].totalPnL;
-            lastWeekEquity = weeks[i].endEquity;
-        } else {
-            weeks[i] = {
-                trades: [],
-                totalPnL: 0,
-                weeklyPnLPercent: 0,
-                wins: 0,
-                losses: 0,
-                breakeven: 0,
-                startEquity: lastWeekEquity,
-                endEquity: lastWeekEquity
-            };
-        }
+  // Group by week
+  tradesWithEquity.forEach((trade) => {
+    const week = trade.week;
+    if (!weeks[week]) {
+      weeks[week] = {
+        trades: [],
+        totalPnL: 0,
+        weeklyPnLPercent: 0,
+        wins: 0,
+        losses: 0,
+        breakeven: 0,
+        startEquity: 0,
+        endEquity: 0,
+        mostTradedPair: "---",
+        mostProfitablePair: "---",
+        mostLosingPair: "---",
+        highestBreakevenPair: "---",
+      };
     }
-    
-    return weeks;
+    weeks[week].trades.push(trade);
+  });
 
+  // Weekly calculations
+  let lastWeekEquity = capital;
+  for (let i = 1; i <= 52; i++) {
+    if (weeks[i]) {
+      const weekTrades = weeks[i].trades;
+
+      weeks[i].startEquity = lastWeekEquity;
+      weeks[i].totalPnL = weekTrades.reduce((sum, t) => sum + t.pnlCurrency, 0);
+      weeks[i].weeklyPnLPercent = (weeks[i].totalPnL / capital) * 100;
+      weeks[i].wins = weekTrades.filter((t) => classifyTrade(t, capital) === "win").length;
+      weeks[i].losses = weekTrades.filter((t) => classifyTrade(t, capital) === "loss").length;
+      weeks[i].breakeven = weekTrades.filter((t) => classifyTrade(t, capital) === "breakeven").length;
+      weeks[i].endEquity = weeks[i].startEquity + weeks[i].totalPnL;
+      lastWeekEquity = weeks[i].endEquity;
+
+      // --- 📊 Pair-based calculations ---
+      const pairStats = {}; // { pair: { count, netPercent, profitPercent, lossPercent, breakevenPercent } }
+
+      weekTrades.forEach((t) => {
+        const pair = t.symbol || t.pair || "Unknown";
+        const ret = t.pnlPercent ?? 0;
+        const risk = t.risk ?? 0;
+
+        if (!pairStats[pair]) {
+          pairStats[pair] = {
+            count: 0,
+            netPercent: 0,
+            profitPercent: 0,
+            lossPercent: 0,
+            breakevenPercent: 0,
+          };
+        }
+
+        pairStats[pair].count++;
+        pairStats[pair].netPercent += ret;
+
+        if (ret > risk) {
+          pairStats[pair].profitPercent += ret;
+        } else if (ret >= 0 && ret <= risk) {
+          pairStats[pair].breakevenPercent += ret;
+        } else if (ret < 0) {
+          pairStats[pair].lossPercent += ret;
+        }
+      });
+
+      // --- Most Traded ---
+      const mostTraded = Object.entries(pairStats)
+        .sort((a, b) => b[1].count - a[1].count)[0];
+      weeks[i].mostTradedPair = mostTraded ? mostTraded[0] : "---";
+
+      // --- Most Profitable ---
+      const profitable = Object.entries(pairStats)
+        .filter(([_, s]) => s.profitPercent > 0)
+        .sort((a, b) => b[1].profitPercent - a[1].profitPercent)[0];
+      weeks[i].mostProfitablePair = profitable ? profitable[0] : "---";
+
+      // --- Most Losing ---
+      const losing = Object.entries(pairStats)
+        .filter(([_, s]) => s.lossPercent < 0)
+        .sort((a, b) => a[1].lossPercent - b[1].lossPercent)[0];
+      weeks[i].mostLosingPair = losing ? losing[0] : "---";
+
+      // --- Highest Breakeven ---
+      const breakeven = Object.entries(pairStats)
+        .filter(([_, s]) => s.breakevenPercent > 0)
+        .sort((a, b) => b[1].breakevenPercent - a[1].breakevenPercent)[0];
+      weeks[i].highestBreakevenPair = breakeven ? breakeven[0] : "---";
+    } else {
+      // Empty week
+      weeks[i] = {
+        trades: [],
+        totalPnL: 0,
+        weeklyPnLPercent: 0,
+        wins: 0,
+        losses: 0,
+        breakeven: 0,
+        startEquity: lastWeekEquity,
+        endEquity: lastWeekEquity,
+        mostTradedPair: "---",
+        mostProfitablePair: "---",
+        mostLosingPair: "---",
+        highestBreakevenPair: "---",
+      };
+    }
+  }
+
+  return weeks;
 }, [tradesHistory, capital]);
 
+// Frequency of trades per pair
+const pairFrequencyData = useMemo(() => {
+  const stats = {};
+  tradesHistory.forEach((t) => {
+    const pair = t.symbol || t.pair || "Unknown";
+    if (!stats[pair]) stats[pair] = 0;
+    stats[pair]++;
+  });
+  return Object.entries(stats).map(([pair, count]) => ({ pair, count }));
+}, [tradesHistory]);
+
+// Profitability per pair (aggregated PnL)
+const pairProfitabilityData = useMemo(() => {
+  const stats = {};
+  tradesHistory.forEach((t) => {
+    const pair = t.symbol || t.pair || "Unknown";
+    const pnl = t.pnlCurrency ?? 0;
+    if (!stats[pair]) stats[pair] = 0;
+    stats[pair] += pnl;
+  });
+  return Object.entries(stats).map(([pair, pnl]) => ({ pair, pnl }));
+}, [tradesHistory]);
+
+// Frequency of trades per session
+const sessionFrequencyData = useMemo(() => {
+  const stats = {};
+  tradesHistory.forEach((t) => {
+    const session = t.session || "Unknown"; // make sure you store session in trade object
+    if (!stats[session]) stats[session] = 0;
+    stats[session]++;
+  });
+  return Object.entries(stats).map(([session, count]) => ({ session, count }));
+}, [tradesHistory]);
+
+// Profitability per session
+const sessionProfitabilityData = useMemo(() => {
+  const stats = {};
+  tradesHistory.forEach((t) => {
+    const session = t.session || "Unknown";
+    const pnl = t.pnlCurrency ?? 0;
+    if (!stats[session]) stats[session] = 0;
+    stats[session] += pnl;
+  });
+  return Object.entries(stats).map(([session, pnl]) => ({ session, pnl }));
+}, [tradesHistory]);
+
+// Fixed days order
+const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
+
+// Frequency of trades per day of the week
+const dayFrequencyData = useMemo(() => {
+  const stats = {};
+  tradesHistory.forEach((t) => {
+    const dayIndex = new Date(t.exitDate).getDay(); // 0=Sunday ... 6=Saturday
+    if (dayIndex >= 1 && dayIndex <= 5) {
+      const day = days[dayIndex - 1];
+      if (!stats[day]) stats[day] = 0;
+      stats[day]++;
+    }
+  });
+  return days.map((day) => ({ day, count: stats[day] || 0 }));
+}, [tradesHistory]);
+
+// Profitability per day of the week
+const dayProfitabilityData = useMemo(() => {
+  const stats = {};
+  tradesHistory.forEach((t) => {
+    const dayIndex = new Date(t.exitDate).getDay();
+    if (dayIndex >= 1 && dayIndex <= 5) {
+      const day = days[dayIndex - 1];
+      const pnl = t.pnlCurrency ?? 0;
+      if (!stats[day]) stats[day] = 0;
+      stats[day] += pnl;
+    }
+  });
+  return days.map((day) => ({ day, pnl: stats[day] || 0 }));
+}, [tradesHistory]);
+
+
 const weekData = weeklyReviewData[selectedWeek] || {
-    trades: [],
-    totalPnL: 0,
-    weeklyPnLPercent: 0,
-    wins: 0,
-    losses: 0,
-    breakeven: 0,
-    startEquity: 0,
-    endEquity: 0
+  trades: [],
+  totalPnL: 0,
+  weeklyPnLPercent: 0,
+  wins: 0,
+  losses: 0,
+  breakeven: 0,
+  startEquity: 0,
+  endEquity: 0,
+  mostTradedPair: "---",
+  mostProfitablePair: "---",
+  mostLosingPair: "---",
+  highestBreakevenPair: "---",
 };
+
 // --- Daily breakdown: one row per trade ---
 const dailyBreakdown = useMemo(() => {
   const daysOfWeek = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
@@ -1311,255 +1618,630 @@ const dailyBreakdown = useMemo(() => {
 
         switch (activeTab) {
             case "dashboard":
-                return (
-                    <div className="space-y-8 max-w-7xl mx-auto py-8 text-gray-200">
-                        <div className="text-sm text-gray-400">
-                            User ID: <span className="font-mono break-all">{userId}</span>
-                        </div>
-                        {/* New Block */}
-                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                            <DashboardCard
-                                title="Total Trades"
-                                value={dashboardStats.totalTrades}
-                            />
-                            <DashboardCard
-                                title="Total PnL"
-                                value={`$${fmt2(dashboardStats.totalPnLCurrency)}`}
-                            />
-                            <DashboardCard
-                                title="Current Equity"
-                                value={`$${fmt2(dashboardStats.currentEquity)}`}
-                            />
-                            <DashboardCard
-                                title="Capital"
-                                value={`$${fmt2(capital)}`}
-                            />
-                        </div>
+  return (
+    <div className="flex gap-6 max-w-7xl mx-auto py-8 text-gray-200">
+      {/* Sidebar */}
+      <div className="w-56 bg-gray-800 p-4 rounded-2xl border border-gray-700 flex flex-col space-y-2">
+        <button
+          className={`text-left px-4 py-2 rounded-lg transition ${
+            dashboardView === "overview"
+              ? "bg-blue-600 text-white font-semibold"
+              : "hover:bg-gray-700"
+          }`}
+          onClick={() => setDashboardView("overview")}
+        >
+          Account Overview
+        </button>
 
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                            {/* New Progress List */}
-                            <div className="bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700">
-                                <h3 className="text-lg font-semibold text-white mb-4">Progress</h3>
-                                <ul className="space-y-2">
-                                    <li><span className="font-semibold">Win Rate%:</span> {fmt2(dashboardStats.winRate)}%</li>
-                                    <li><span className="font-semibold">Loss Rate%:</span> {fmt2(dashboardStats.lossRate)}%</li>
-                                    <li><span className="font-semibold">Breakeven Rate%:</span> {fmt2(dashboardStats.breakevenRate)}%</li>
-                                </ul>
-                            </div>
+        <button
+          className={`text-left px-4 py-2 rounded-lg transition ${
+            dashboardView === "pairs"
+              ? "bg-blue-600 text-white font-semibold"
+              : "hover:bg-gray-700"
+          }`}
+          onClick={() => setDashboardView("pairs")}
+        >
+          Pair Statistics
+        </button>
 
-                            {/* New Pair Stat List */}
-                            <div className="bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700">
-                                <h3 className="text-lg font-semibold text-white mb-4">Pair stat</h3>
-                                <ul className="space-y-2">
-                                    <li><span className="font-semibold">Most Profitable Pair:</span> {dashboardStats.mostProfitablePair || "N/A"}</li>
-                                    <li><span className="font-semibold">Most Losing:</span> {dashboardStats.mostLosingPair || "N/A"}</li>
-                                    <li><span className="font-semibold">Most Traded:</span> {dashboardStats.mostTradedPair || "N/A"}</li>
-                                    <li><span className="font-semibold">Highest Breakeven:</span> {dashboardStats.highestBreakevenPair || "N/A"}</li>
-                                </ul>
-                            </div>
-                        </div>
-<div className="bg-gray-800 p-6 rounded-2xl shadow-lg transition-all duration-300 transform hover:scale-105 backdrop-blur-md bg-white/10 border border-white/20">
-    <h2 className="text-xl font-semibold mb-4 text-white">Weekly Equity Growth</h2>
-    <ResponsiveContainer width="100%" height={400}>
-        <LineChart data={equityChartData}>
-            <defs>
-                <linearGradient id="equityGradient" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#82ca9d" stopOpacity={0.8} />
-                    <stop offset="95%" stopColor="#82ca9d" stopOpacity={0} />
-                </linearGradient>
-            </defs>
-            <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.5} />
-            <XAxis dataKey="week" stroke="#ccc" />
+        <button
+          className={`text-left px-4 py-2 rounded-lg transition ${
+            dashboardView === "sessions"
+              ? "bg-blue-600 text-white font-semibold"
+              : "hover:bg-gray-700"
+          }`}
+          onClick={() => setDashboardView("sessions")}
+        >
+          Session Statistics
+        </button>
+
+        <button
+          className={`text-left px-4 py-2 rounded-lg transition ${
+            dashboardView === "transactions"
+              ? "bg-blue-600 text-white font-semibold"
+              : "hover:bg-gray-700"
+          }`}
+          onClick={() => setDashboardView("transactions")}
+        >
+          Transactions
+        </button>
+      </div>
+
+      {/* Main Content */}
+      <div className="flex-1 space-y-8">
+        {dashboardView === "overview" && (
+          <>
+            {/* User Info Row */}
+            <div className="flex flex-wrap items-center gap-6 text-sm text-gray-300">
+              <span>
+                User ID: <span className="font-mono break-all">{userId}</span>
+              </span>
+
+              {userSettings?.accountName && (
+                <span>
+                  Account:{" "}
+                  <span className="font-semibold">
+                    {userSettings.accountName}
+                  </span>
+                </span>
+              )}
+
+              {userSettings?.startingCapital && (
+                <span>
+                  Capital:{" "}
+                  <span className="font-semibold">${fmt2(capital)}</span>
+                </span>
+              )}
+            </div>
+
+            {/* Dashboard Cards */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+              <DashboardCard title="Total Trades" value={dashboardStats.totalTrades} />
+              <DashboardCard
+                title="Total PnL"
+                value={`$${fmt2(dashboardStats.totalPnLCurrency)}`}
+              />
+              <DashboardCard
+                title="Current Equity"
+                value={`$${fmt2(dashboardStats.currentEquity)}`}
+              />
+              <DashboardCard title="Capital" value={`$${fmt2(capital)}`} />
+            </div>
+
+            {/* Progress + Pair Stat */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Progress */}
+              <div className="bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700">
+                <h3 className="text-lg font-semibold text-white mb-4">Progress</h3>
+                <ul className="space-y-2">
+                  <li>
+                    <span className="font-semibold">Win Rate%:</span>{" "}
+                    {fmt2(dashboardStats.winRate)}%
+                  </li>
+                  <li>
+                    <span className="font-semibold">Loss Rate%:</span>{" "}
+                    {fmt2(dashboardStats.lossRate)}%
+                  </li>
+                  <li>
+                    <span className="font-semibold">Breakeven Rate%:</span>{" "}
+                    {fmt2(dashboardStats.breakevenRate)}%
+                  </li>
+                </ul>
+              </div>
+
+              {/* Pair Stat */}
+              <div className="bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700">
+                <h3 className="text-lg font-semibold text-white mb-4">Pair stat</h3>
+                <ul className="space-y-2">
+                  <li>
+                    <span className="font-semibold">Most Profitable Pair:</span>{" "}
+                    {dashboardStats.mostProfitablePair || "N/A"}
+                  </li>
+                  <li>
+                    <span className="font-semibold">Most Losing:</span>{" "}
+                    {dashboardStats.mostLosingPair || "N/A"}
+                  </li>
+                  <li>
+                    <span className="font-semibold">Most Traded:</span>{" "}
+                    {dashboardStats.mostTradedPair || "N/A"}
+                  </li>
+                  <li>
+                    <span className="font-semibold">Highest Breakeven:</span>{" "}
+                    {dashboardStats.highestBreakevenPair || "N/A"}
+                  </li>
+                </ul>
+              </div>
+            </div>
+
+            {/* Weekly Equity Growth */}
+            <div className="bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700">
+              <h2 className="text-xl font-semibold mb-4 text-white">
+                Weekly Equity Growth
+              </h2>
+              <ResponsiveContainer width="100%" height={400}>
+                <LineChart data={equityChartData}>
+                  <defs>
+                    <linearGradient id="equityGradient" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#82ca9d" stopOpacity={0.8} />
+                      <stop offset="95%" stopColor="#82ca9d" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.5} />
+                  <XAxis dataKey="label" stroke="#ccc" />
+                  <YAxis
+                    stroke="#ccc"
+                    domain={["dataMin - 50", "dataMax + 50"]}
+                    tickFormatter={(v) => `$${v}`}
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: "rgba(255, 255, 255, 0.15)",
+                      backdropFilter: "blur(10px)",
+                      border: "1px solid rgba(255, 255, 255, 0.2)",
+                      borderRadius: "10px",
+                      color: "#fff",
+                    }}
+                  />
+                  <ReferenceLine
+                    y={capital}
+                    stroke="#ff7300"
+                    strokeDasharray="3 3"
+                    label={{ position: "top", value: "Start", fill: "#ff7300" }}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="equity"
+                    stroke="#82ca9d"
+                    strokeWidth={2}
+                    dot={{ stroke: "#82ca9d", strokeWidth: 2, r: 4 }}
+                    activeDot={{ r: 6 }}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </>
+        )}
+
+       {/* Pair Statistics Tab */}
+{dashboardView === "pairs" && (
+  <div className="space-y-8">
+    {/* Traded Pairs Frequency */}
+    <div className="bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700">
+      <h2 className="text-xl font-semibold text-white mb-4">Traded Pairs Frequency</h2>
+      <ResponsiveContainer width="100%" height={400}>
+        <BarChart
+          layout="vertical"
+          data={[...pairFrequencyData].sort((a, b) => b.count - a.count)} // most traded at top
+          margin={{ top: 20, right: 30, left: 50, bottom: 20 }}
+        >
+          <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.3} />
+          <XAxis type="number" stroke="#ccc" />
+          <YAxis dataKey="pair" type="category" stroke="#ccc" />
+          <Tooltip />
+          <Bar dataKey="count" fill="#8884d8" barSize={25} />
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+
+    {/* Profitability by Pair */}
+    <div className="bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700">
+      <h2 className="text-xl font-semibold text-white mb-4">Profitability by Pair</h2>
+      <ResponsiveContainer width="100%" height={400}>
+        <BarChart
+          data={pairProfitabilityData}
+          margin={{ top: 20, right: 30, left: 20, bottom: 50 }}
+        >
+          <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.3} />
+          <XAxis dataKey="pair" stroke="#ccc" angle={-45} textAnchor="end" interval={0} />
+          <YAxis stroke="#ccc" />
+          <Tooltip />
+          <Bar dataKey="pnl" fill="#82ca9d">
+            {pairProfitabilityData.map((entry, index) => (
+              <Cell key={`cell-${index}`} fill={entry.pnl >= 0 ? "#4ade80" : "#f87171"} />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  </div>
+)}
+
+
+        {dashboardView === "sessions" && (
+  <div className="space-y-12">
+    {/* Session Statistics */}
+    <div className="bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700 space-y-8">
+      <h2 className="text-xl font-semibold text-white mb-4">Session Statistics</h2>
+
+      {/* Frequency per Session */}
+      <div>
+        <h3 className="text-lg font-semibold text-white mb-2">Trade Frequency by Session</h3>
+        <ResponsiveContainer width="100%" height={300}>
+          <BarChart
+            layout="vertical"
+            data={[...sessionFrequencyData].sort((a, b) => b.count - a.count)}
+          >
+            <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.3} />
+            <XAxis type="number" stroke="#ccc" />
+            <YAxis dataKey="session" type="category" stroke="#ccc" />
+            <Tooltip />
+            <Bar dataKey="count" fill="#8884d8" barSize={25} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Profitability per Session */}
+      <div>
+        <h3 className="text-lg font-semibold text-white mb-2">Profitability by Session</h3>
+        <ResponsiveContainer width="100%" height={300}>
+          <BarChart data={sessionProfitabilityData}>
+            <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.3} />
+            <XAxis dataKey="session" stroke="#ccc" />
             <YAxis stroke="#ccc" />
-            <Tooltip
-                contentStyle={{
-                    backgroundColor: "rgba(255, 255, 255, 0.15)",
-                    backdropFilter: "blur(10px)",
-                    border: "1px solid rgba(255, 255, 255, 0.2)",
-                    borderRadius: "10px",
-                    color: "#fff"
-                }}
-            />
-            <ReferenceLine y={1000} stroke="#ff7300" strokeDasharray="3 3" label={{ position: 'top', value: 'Starting Capital', fill: '#ff7300' }} />
-            <Line
-                type="monotone"
-                dataKey="equity"
-                stroke="#82ca9d"
-                strokeWidth={2}
-                dot={{ stroke: '#82ca9d', strokeWidth: 2, r: 4 }}
-                activeDot={{ r: 6 }}
-            />
-        </LineChart>
-    </ResponsiveContainer>
+            <Tooltip />
+            <Bar dataKey="pnl">
+              {sessionProfitabilityData.map((entry, index) => (
+                <Cell key={`cell-${index}`} fill={entry.pnl >= 0 ? "#4ade80" : "#f87171"} />
+              ))}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+
+    {/* Day-of-Week Statistics */}
+    <div className="bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700 space-y-8">
+      <h2 className="text-xl font-semibold text-white mb-4">Day of the Week Statistics</h2>
+
+      {/* Frequency per Day */}
+      <div>
+        <h3 className="text-lg font-semibold text-white mb-2">Trade Frequency by Day</h3>
+        <ResponsiveContainer width="100%" height={300}>
+          <BarChart data={dayFrequencyData}>
+            <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.3} />
+            <XAxis dataKey="day" stroke="#ccc" />
+            <YAxis stroke="#ccc" />
+            <Tooltip />
+            <Bar dataKey="count" fill="#8884d8" />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Profitability per Day */}
+      <div>
+        <h3 className="text-lg font-semibold text-white mb-2">Profitability by Day</h3>
+        <ResponsiveContainer width="100%" height={300}>
+          <BarChart data={dayProfitabilityData}>
+            <CartesianGrid strokeDasharray="3 3" strokeOpacity={0.3} />
+            <XAxis dataKey="day" stroke="#ccc" />
+            <YAxis stroke="#ccc" />
+            <Tooltip />
+            <Bar dataKey="pnl">
+              {dayProfitabilityData.map((entry, index) => (
+                <Cell key={`cell-${index}`} fill={entry.pnl >= 0 ? "#4ade80" : "#f87171"} />
+              ))}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  </div>
+)}
+
+
+        {dashboardView === "transactions" && (
+          <div className="bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700">
+  <h2 className="text-xl font-semibold mb-4 text-white">Transactions</h2>
+  <div className="overflow-x-auto">
+    <table className="min-w-full divide-y divide-gray-700 text-sm">
+      <thead>
+        <tr className="text-gray-400">
+          <th className="px-4 py-2 text-left">Date</th>
+          <th className="px-4 py-2 text-left">Type</th>
+          <th className="px-4 py-2 text-right">Amount</th>
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-gray-700">
+        {transactionsData.map((txn, idx) => (
+          <tr key={idx}>
+            <td className="px-4 py-2">{new Date(txn.date).toLocaleDateString()}</td>
+            <td className="px-4 py-2">{txn.type}</td>
+            <td
+              className={`px-4 py-2 text-right font-semibold ${
+                txn.amount >= 0 ? "text-green-400" : "text-red-400"
+              }`}
+            >
+              {txn.amount >= 0 ? "+" : ""}
+              ${fmt2(txn.amount)}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </div>
 </div>
-                        
-                        </div>
-                );
+
+        )}
+      </div>
+    </div>
+  );
+
+
             case "tradeLog":
                 return (
                     <>
                         {/* MAIN GRID */}
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-7xl mx-auto py-8 text-gray-200">
-                            {/* FORM SECTION */}
-                            <div className="md:col-span-1">
-                                <div className="bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700">
-                                    <h2 className="text-2xl font-bold mb-6 text-white">Add New Trade</h2>
-                                    <form onSubmit={handleSaveTrade} className="space-y-4">
-                                        <div className="flex flex-col">
-                                            <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="pair">Pair/Symbol</label>
-                                            <select
-                                                id="pair"
-                                                name="pair"
-                                                value={formData.pair}
-                                                onChange={handleChange}
-                                                className={styles.input}
-                                                required
-                                            >
-                                                <option value="">Select Pair</option>
-                                                {Object.keys(vpValues).map(p => (
-                                                    <option key={p} value={p}>{p}</option>
-                                                ))}
-                                            </select>
-                                        </div>
-                                        <div className="grid grid-cols-2 gap-4">
-                                            <div className="flex flex-col">
-                                                <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="type">Type</label>
-                                                <select
-                                                    id="type"
-                                                    name="type"
-                                                    value={formData.type}
-                                                    onChange={handleChange}
-                                                    className={styles.input}
-                                                >
-                                                    <option value="long">Long</option>
-                                                    <option value="short">Short</option>
-                                                </select>
-                                            </div>
-                                            <div className="flex flex-col">
-                                                <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="entryDate">Entry Date</label>
-                                                <input
-                                                    type="date"
-                                                    id="entryDate"
-                                                    name="entryDate"
-                                                    value={formData.entryDate}
-                                                    onChange={handleChange}
-                                                    className={styles.input}
-                                                />
-                                            </div>
-                                        </div>
-                                        <div className="grid grid-cols-3 gap-4">
-                                            <div className="flex flex-col">
-                                                <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="price">Entry Price</label>
-                                                <input
-                                                    type="number"
-                                                    id="price"
-                                                    name="price"
-                                                    value={formData.price}
-                                                    onChange={handleChange}
-                                                    className={styles.input}
-                                                    step="0.00001"
-                                                    placeholder="e.g., 1.12345"
-                                                    required
-                                                />
-                                            </div>
-                                            <div className="flex flex-col">
-                                                <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="sl">Stop Loss</label>
-                                                <input
-                                                    type="number"
-                                                    id="sl"
-                                                    name="sl"
-                                                    value={formData.sl}
-                                                    onChange={handleChange}
-                                                    className={styles.input}
-                                                    step="0.00001"
-                                                    placeholder="e.g., 1.12000"
-                                                    required
-                                                />
-                                            </div>
-                                            <div className="flex flex-col">
-                                                <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="tp">Take Profit</label>
-                                                <input
-                                                    type="number"
-                                                    id="tp"
-                                                    name="tp"
-                                                    value={formData.tp}
-                                                    onChange={handleChange}
-                                                    className={styles.input}
-                                                    step="0.00001"
-                                                    placeholder="e.g., 1.13000"
-                                                    required
-                                                />
-                                            </div>
-                                        </div>
-                                        <div className="flex flex-col">
-                                            <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="risk">Risk %</label>
-                                            <select
-                                                id="risk"
-                                                name="risk"
-                                                value={formData.risk}
-                                                onChange={handleChange}
-                                                className={styles.input}
-                                            >
-                                                <option value="2.0">2.0%</option>
-                                                <option value="2.1">2.1%</option>
-                                                <option value="2.2">2.2%</option>
-                                                <option value="2.3">2.3%</option>
-                                                <option value="2.4">2.4%</option>
-                                                <option value="2.5">2.5%</option>
-                                                <option value="2.6">2.6%</option>
-                                                <option value="2.7">2.7%</option>
-                                                <option value="2.8">2.8%</option>
-                                                <option value="2.9">2.9%</option>
-                                                <option value="3.0">3.0%</option>
-                                            </select>
-                                        </div>
-                                        <div className="mb-4">
-  <label className="block text-sm font-medium text-gray-200">Session</label>
-  <select
-    value={session}
-    onChange={(e) => setSession(e.target.value)}
-    className="mt-1 block w-full rounded-md bg-gray-800 border border-gray-600 text-gray-200 p-2"
-  >
-    <option value="">Select Session</option>
-    <option value="Sydney">Sydney</option>
-    <option value="Tokyo">Tokyo</option>
-    <option value="London">London</option>
-    <option value="New-York">New-York</option>
-    <option value="Sydney & Tokyo">Sydney & Tokyo</option>
-    <option value="Tokyo & London">Tokyo & London</option>
-    <option value="London & New York">London & New York</option>
-  </select>
+                           {/* FORM SECTION */}
+<div className="md:col-span-1">
+{/* LOT SIZE CALCULATION SECTION */}
+<div className="bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700 mb-6">
+  <h2 className="text-xl font-bold mb-4 text-white">Lot Size Calculator</h2>
+
+  {/* Pair Selection */}
+  <div className="flex flex-col mb-4">
+    <label className="text-sm font-medium text-gray-400 mb-1">Pair</label>
+    <select
+      value={calcPair}
+      onChange={(e) => setCalcPair(e.target.value)}
+      className={styles.input}
+    >
+      <option value="">Select Pair</option>
+      {Object.keys(vpValues).map((p) => (
+        <option key={p} value={p}>{p}</option>
+      ))}
+    </select>
+  </div>
+
+  {/* Risk in Points */}
+  <div className="flex flex-col mb-4">
+    <label className="text-sm font-medium text-gray-400 mb-1">Risk in Points (Only the first three digit)</label>
+    <input
+      type="number"
+      value={calcPoints}
+      onChange={(e) => setCalcPoints(Number(e.target.value))}
+      className={styles.input}
+      placeholder="e.g., 150"
+    />
+  </div>
+
+  {/* Risk Percentage */}
+  <div className="flex flex-col mb-4">
+    <label className="text-sm font-medium text-gray-400 mb-1">Risk %</label>
+    <select
+      value={calcRiskPercent}
+      onChange={(e) => setCalcRiskPercent(Number(e.target.value))}
+      className={styles.input}
+    >
+      {[2.0, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, 3.0].map((r) => (
+        <option key={r} value={r}>{r}%</option>
+      ))}
+    </select>
+  </div>
+
+  {/* Account Type */}
+  <div className="flex flex-col mb-4">
+    <label className="text-sm font-medium text-gray-400 mb-1">Account Type</label>
+    <select
+      value={calcAccountType}
+      onChange={(e) => setCalcAccountType(e.target.value)}
+      className={styles.input}
+    >
+      <option value="Standard">Standard</option>
+      <option value="Mini">Mini</option>
+      <option value="Micro">Micro</option>
+    </select>
+  </div>
+
+  {/* Outputs */}
+  <div className="mt-4 p-4 rounded-xl bg-gray-700 border border-gray-600 space-y-2 text-sm text-gray-300">
+    <p>
+      <span className="font-semibold">Lot Size:</span>{" "}
+      {calcLotSize ? calcLotSize.toFixed(2) : "0.00"}
+    </p>
+    <p>
+      <span className="font-semibold">Risk Amount ($):</span>{" "}
+      {calcRiskAmount ? `$${calcRiskAmount.toFixed(2)}` : "$0.00"}
+    </p>
+  </div>
 </div>
 
-                                        <div className="flex flex-col">
-  <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="beforeImage">Before Image URL</label>
-  <input
-    type="url"
-    id="beforeImage"
-    name="beforeImage"
-    value={formData.beforeImage || ''}
-    onChange={(e) => setFormData(prev => ({ ...prev, beforeImage: e.target.value }))}
-    placeholder="https://example.com/before.jpg"
-    className={styles.input}
-  />
-  <p className="text-xs text-gray-500 mt-1">Paste a publicly accessible image URL (starts with https://)</p>
-</div>
+           {/* Add new Trade */}
+  <div className="bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700">
+    <h2 className="text-2xl font-bold mb-6 text-white">Add New Trade</h2>
+    <form onSubmit={handleSaveTrade} className="space-y-4">
+      {/* Pair / Symbol */}
+      <div className="flex flex-col">
+        <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="pair">Pair/Symbol</label>
+        <select
+          id="pair"
+          name="pair"
+          value={formData.pair}
+          onChange={handleChange}
+          className={styles.input}
+          required
+        >
+          <option value="">Select Pair</option>
+          {Object.keys(vpValues).map(p => (
+            <option key={p} value={p}>{p}</option>
+          ))}
+        </select>
+      </div>
 
+      {/* Type + Entry Date */}
+      <div className="grid grid-cols-2 gap-4">
+        <div className="flex flex-col">
+          <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="type">Type</label>
+          <select
+            id="type"
+            name="type"
+            value={formData.type}
+            onChange={handleChange}
+            className={styles.input}
+          >
+            <option value="long">Long</option>
+            <option value="short">Short</option>
+          </select>
+        </div>
+        <div className="flex flex-col">
+          <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="entryDate">Entry Date</label>
+          <input
+            type="date"
+            id="entryDate"
+            name="entryDate"
+            value={formData.entryDate}
+            onChange={handleChange}
+            className={styles.input}
+          />
+        </div>
+      </div>
 
-                                        <div className="mt-4 p-4 rounded-xl bg-gray-700 border border-gray-600 space-y-2 text-sm text-gray-300">
-                                            <p><span className="font-semibold">SL Points:</span>{' '}{/* Always show SL in red (use rounded integer points) */}<span className="text-red-500">{liveStopLossPoints ? Math.abs(Math.round(liveStopLossPoints)) : 0}</span></p>
-                                            <p><span className="font-semibold">TP Points:</span>{' '}{/* Always show TP in blue */}<span className="text-blue-400">{liveTakeProfitPoints ? Math.abs(Math.round(liveTakeProfitPoints)) : 0}</span></p>
-                                            <p><span className="font-semibold">R Ratio:</span>{' '}{liveStopLossPoints !== 0 ? fmt2(liveTakeProfitPoints / liveStopLossPoints) : "N/A"}</p>
-                                            <p><span className="font-semibold">Lot Size:</span>{' '}{/* Display rounded to 2 decimals and green if > 0 */}{coloredLot(liveLotSize)}</p>
-                                            <p><span className="font-semibold">Est. Risk:</span>{' '}{/* Use coloredBySign so negative shows red, positive blue */}{coloredBySign(liveStopLossCurrency, v => `$${fmt2(v)}`)}</p>
-                                            <p><span className="font-semibold">Est. Profit:</span>{' '}{coloredBySign(liveTakeProfitCurrency, v => `$${fmt2(v)}`)}</p>
-                                            <p><span className="font-semibold">Daily Risk Used:</span>{' '}{fmt2(summaryForSelectedDate.riskUsed)}% of {DAILY_RISK_LIMIT_PERCENT}%</p>
-                                        </div>
-                                        <button type="submit" className={styles.submitButton}>
-                                            Save Trade
-                                        </button>
-                                    </form>
-                                </div>
+      {/* Entry, SL, TP */}
+      <div className="grid grid-cols-3 gap-4">
+        <div className="flex flex-col">
+          <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="price">Entry Price</label>
+          <input
+            type="number"
+            id="price"
+            name="price"
+            value={formData.price}
+            onChange={handleChange}
+            className={styles.input}
+            step="0.00001"
+            placeholder="e.g., 1.12345"
+            required
+          />
+        </div>
+        <div className="flex flex-col">
+          <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="sl">Stop Loss</label>
+          <input
+            type="number"
+            id="sl"
+            name="sl"
+            value={formData.sl}
+            onChange={handleChange}
+            className={styles.input}
+            step="0.00001"
+            placeholder="e.g., 1.12000"
+            required
+          />
+        </div>
+        <div className="flex flex-col">
+          <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="tp">Take Profit</label>
+          <input
+            type="number"
+            id="tp"
+            name="tp"
+            value={formData.tp}
+            onChange={handleChange}
+            className={styles.input}
+            step="0.00001"
+            placeholder="e.g., 1.13000"
+            required
+          />
+        </div>
+      </div>
+
+      {/* Risk */}
+      <div className="flex flex-col">
+        <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="risk">Risk %</label>
+        <select
+          id="risk"
+          name="risk"
+          value={formData.risk}
+          onChange={handleChange}
+          className={styles.input}
+        >
+          <option value="2.0">2.0%</option>
+          <option value="2.1">2.1%</option>
+          <option value="2.2">2.2%</option>
+          <option value="2.3">2.3%</option>
+          <option value="2.4">2.4%</option>
+          <option value="2.5">2.5%</option>
+          <option value="2.6">2.6%</option>
+          <option value="2.7">2.7%</option>
+          <option value="2.8">2.8%</option>
+          <option value="2.9">2.9%</option>
+          <option value="3.0">3.0%</option>
+        </select>
+      </div>
+
+      {/* Session */}
+      <div className="flex flex-col">
+        <label className="text-sm font-medium text-gray-200 mb-1" htmlFor="session">Session</label>
+        <select
+          id="session"
+          name="session"
+          value={formData.session || ""}
+          onChange={handleChange}
+          className="mt-1 block w-full rounded-md bg-gray-800 border border-gray-600 text-gray-200 p-2"
+        >
+          <option value="">Select Session</option>
+          <option value="Sydney">Sydney</option>
+          <option value="Tokyo">Tokyo</option>
+          <option value="London">London</option>
+          <option value="New-York">New-York</option>
+          <option value="Sydney & Tokyo">Sydney & Tokyo</option>
+          <option value="Tokyo & London">Tokyo & London</option>
+          <option value="London & New York">London & New York</option>
+        </select>
+      </div>
+
+      {/* Strategy */}
+      <div className="flex flex-col">
+        <label className="text-sm font-medium text-gray-200 mb-1" htmlFor="strategy">Strategy</label>
+        <select
+          id="strategy"
+          name="strategy"
+          value={formData.strategy || ""}
+          onChange={handleChange}
+          className="mt-1 block w-full rounded-md bg-gray-800 border border-gray-600 text-gray-200 p-2"
+        >
+          <option value="">Select Strategy</option>
+          <option value="1/5min BOT, 5MCC">1/5min BOT, 5MCC</option>
+          <option value="1/5min BOT, 15MCC">1/5min BOT, 15MCC</option>
+          <option value="5/15min BOT, 15MCC">5/15min BOT, 15MCC</option>
+          <option value="5/15min BOT, H1MCC">5/15min BOT, H1MCC</option>
+          <option value="1/5min BOS, 5MCC">1/5min BOS, 5MCC</option>
+          <option value="1/5min BOS, 15MCC">1/5min BOS, 15MCC</option>
+          <option value="5/15min BOS, 15MCC">5/15min BOS, 15MCC</option>
+          <option value="5/15min BOS, H1MCC">5/15min BOS, H1MCC</option>
+        </select>
+      </div>
+
+      {/* Before Image */}
+      <div className="flex flex-col">
+        <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="beforeImage">Before Image URL</label>
+        <input
+          type="url"
+          id="beforeImage"
+          name="beforeImage"
+          value={formData.beforeImage || ""}
+          onChange={handleChange}
+          placeholder="https://example.com/before.jpg"
+          className={styles.input}
+        />
+        <p className="text-xs text-gray-500 mt-1">Paste a publicly accessible image URL (starts with https://)</p>
+      </div>
+
+      {/* Calculations */}
+      <div className="mt-4 p-4 rounded-xl bg-gray-700 border border-gray-600 space-y-2 text-sm text-gray-300">
+        <p><span className="font-semibold">SL Points:</span> <span className="text-red-500">{liveStopLossPoints ? Math.abs(Math.round(liveStopLossPoints)) : 0}</span></p>
+        <p><span className="font-semibold">TP Points:</span> <span className="text-blue-400">{liveTakeProfitPoints ? Math.abs(Math.round(liveTakeProfitPoints)) : 0}</span></p>
+        <p><span className="font-semibold">R Ratio:</span> {liveStopLossPoints !== 0 ? fmt2(liveTakeProfitPoints / liveStopLossPoints) : "N/A"}</p>
+        <p><span className="font-semibold">Lot Size:</span> {coloredLot(liveLotSize)}</p>
+        <p><span className="font-semibold">Est. Risk:</span> {coloredBySign(liveStopLossCurrency, v => `$${fmt2(v)}`)}</p>
+        <p><span className="font-semibold">Est. Profit:</span> {coloredBySign(liveTakeProfitCurrency, v => `$${fmt2(v)}`)}</p>
+        <p><span className="font-semibold">Daily Risk Used:</span> {fmt2(summaryForSelectedDate.riskUsed)}% of {DAILY_RISK_LIMIT_PERCENT}%</p>
+      </div>
+
+      {/* Submit */}
+      <button type="submit" className={styles.submitButton}>
+        Save Trade
+      </button>
+    </form>
+  </div>
+
                                 <div className="mt-6 bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700">
                                     <h3 className="text-xl font-bold mb-4 text-white">Daily Limits</h3>
                                     <ul className="space-y-2 text-gray-300">
@@ -1620,7 +2302,7 @@ const dailyBreakdown = useMemo(() => {
   <h3 className="text-xl font-bold mb-4 text-white">
     Closed Trades ({tradesHistory.length})
   </h3>
-  <div className="overflow-x-auto">
+  <div className="overflow-x-auto overflow-y-auto max-h-96">
     <table className="min-w-full table-auto text-sm text-left">
       <thead className="text-gray-400">
         <tr>
@@ -1637,7 +2319,7 @@ const dailyBreakdown = useMemo(() => {
       </thead>
       <tbody>
         {tradesHistory.length > 0 ? (
-          [...tradesHistory].sort((a, b) => new Date(b.exitDate ?? b.createdAt) - new Date(a.exitDate ?? a.createdAt)).map((trade) => (
+          tradesHistory.sort((a, b) => b.id.split("-")[0] - a.id.split("-")[0]).map((trade) => (
               <tr
                 key={trade.id}
                 className="border-t border-gray-700 text-gray-300"
@@ -1682,12 +2364,8 @@ const dailyBreakdown = useMemo(() => {
                   </button>
                 </td>
                 <td className="px-4 py-3">
-                  <button
-                    onClick={() => handleDeleteTrade(trade.id)}
-                    className="text-red-400 hover:underline"
-                  >
-                    Delete
-                  </button>
+                 <button onClick={() => confirmDeleteTrade(trade.id)} className="text-red-400 hover:underline"
+                  >Delete</button>
                 </td>
               </tr>
             ))
@@ -1714,8 +2392,7 @@ const dailyBreakdown = useMemo(() => {
                         <Modal
                             isOpen={modalOpen}
                             onClose={() => setModalOpen(false)}
-                            title="Close Trade"
-                        >
+                            title="Close Trade">
                             <form className="space-y-4">
                                 <div className="flex flex-col">
                                     <label className="text-sm font-medium text-gray-400 mb-1" htmlFor="modalExitDate">Exit Date</label>
@@ -1773,6 +2450,17 @@ const dailyBreakdown = useMemo(() => {
   />
   <p className="text-xs text-gray-500 mt-1">Paste after image URL (optional)</p>
 </div>
+<div className="space-y-1">
+  <label className="block text-gray-300 text-sm">Note</label>
+  <textarea
+    value={closeNote}
+    onChange={(e) => setCloseNote(e.target.value)}
+    className="w-full bg-gray-700 text-white rounded px-3 py-2"
+    rows="3"
+    placeholder="Write your notes about this trade..."
+  />
+</div>
+
 
 
                                 <div className="flex flex-col">
@@ -1864,6 +2552,30 @@ const dailyBreakdown = useMemo(() => {
     </button>
   </form>
 </Modal>
+<Modal
+  isOpen={showDeleteConfirm}
+  onClose={cancelDelete}
+  title="Confirm Delete"
+>
+  <p>Are you sure you want to delete this trade?</p>
+  <div className="mt-4 flex justify-end space-x-3">
+    <button onClick={cancelDelete} className={styles.smallButton}>No</button>
+    <button
+      onClick={async () => {
+        // ensure we close modal first for snappy UI
+        setShowDeleteConfirm(false);
+        if (tradeToDeleteId) {
+          await handleDeleteTrade(tradeToDeleteId);
+          setTradeToDeleteId(null);
+        }
+      }}
+      className={`${styles.smallButton} bg-red-600`}
+    >
+      Yes
+    </button>
+  </div>
+</Modal>
+
                     </>
                 );
             case "weeklyReview": {
@@ -1886,29 +2598,37 @@ const targetLine =
     : capital;
 
 // --- Weekly Equity Growth dataset (trade-by-trade, step by step) ---
+// before building trade-by-trade points
 let runningEquity = weekData.startEquity || 0;
-const weeklyEquityData = [...weekData.trades]
-  .sort((a, b) => new Date(a.entryDate) - new Date(b.entryDate))
-  .map((trade, index) => {
-    runningEquity += trade.pnlCurrency || 0;
-    return {
-      tradeNo: index + 1,
-      date: new Date(trade.entryDate).toLocaleDateString("en-GB", {
-        day: "numeric",
-        month: "short",
-      }),
-      label: `${new Date(trade.entryDate).toLocaleDateString("en-GB", {
-        day: "numeric",
-        month: "short",
-      })} #${index + 1}`,
-      equity: Number(runningEquity.toFixed(2)),
-      pnl: trade.pnlCurrency,
 
-      // 👇 safe to add now because values exist
-      target: targetLine,
-      drawdown: drawdownLine,
-    };
-  });
+const startPoint = {
+  tradeNo: 0,
+  date: '',
+  label: 'Start',
+  equity: Number(runningEquity.toFixed(2)),
+  pnl: 0,
+  target: targetLine,
+  drawdown: drawdownLine,
+};
+
+const weeklyEquityData = [
+  startPoint,
+  ...[...weekData.trades]
+    .sort((a, b) => new Date(a.entryDate) - new Date(b.entryDate))
+    .map((trade, index) => {
+      runningEquity += trade.pnlCurrency || 0;
+      return {
+        tradeNo: index + 1,
+        date: new Date(trade.entryDate).toLocaleDateString("en-GB", { day: "numeric", month: "short" }),
+        label: `${new Date(trade.entryDate).toLocaleDateString("en-GB", { day: "numeric", month: "short" })} #${index + 1}`,
+        equity: Number(runningEquity.toFixed(2)),
+        pnl: trade.pnlCurrency,
+        target: targetLine,
+        drawdown: drawdownLine,
+      };
+    })
+];
+
 
   
 const weeklyRiskData = [...weekData.trades]
@@ -1919,128 +2639,241 @@ const weeklyRiskData = [...weekData.trades]
     label: `${new Date(trade.entryDate).toLocaleDateString("en-GB", { day: "numeric", month: "short" })} #${index + 1}`,
     riskUsed: trade.riskUsed || 0, // ✅ match dashboard key
   }));
- return (
-                    
-                    <div className="space-y-8 max-w-7xl mx-auto py-8 text-gray-200">
-                        <div className="bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700">
-                            <div className="flex justify-between items-center mb-4">
-                                <h3 className="text-2xl font-bold text-white">Weekly Review</h3>
-                                <div className="flex space-x-2">
-                                    <button
-                                        onClick={() => setSelectedWeek(w => w > 1 ? w - 1 : w)}
-                                        className={`${styles.smallButton}`}
-                                    >
-                                        &lt; Prev
-                                    </button>
-                                    <span className="text-lg font-semibold text-white px-4 py-2 rounded-full bg-gray-700">
-                                        Week {selectedWeek} ({getWeekRange(selectedWeek, new Date().getFullYear()).start} - {getWeekRange(selectedWeek, new Date().getFullYear()).end})
-                                    </span>
-                                    <button
-                                        onClick={() => setSelectedWeek(w => w < 52 ? w + 1 : w)}
-                                        className={`${styles.smallButton}`}
-                                    >
-                                        Next &gt;
-                                    </button>
-                                </div>
-                            </div>
-                            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-6">
-                                <div className="bg-gray-700 p-4 rounded-xl shadow">
-                                    <h4 className="text-sm font-semibold opacity-75">Starting Equity</h4>
-                                    <p className="text-xl font-bold mt-1">${fmt2(weekData.startEquity)}</p>
-                                </div>
-                                <div className="bg-gray-700 p-4 rounded-xl shadow">
-                                    <h4 className="text-sm font-semibold opacity-75">Total P&L</h4>
-                                    <p className={`text-xl font-bold mt-1 ${weekData.totalPnL >= 0 ? 'text-green-400' : 'text-red-400'}`}>${fmt2(weekData.totalPnL)}</p>
-                                </div>
-                                <div className="bg-gray-700 p-4 rounded-xl shadow">
-                                    <h4 className="text-sm font-semibold opacity-75">Total Trades</h4>
-                                    <p className="text-xl font-bold mt-1">{weekData.trades.length}</p>
-                                </div>
-                                <div className="bg-gray-700 p-4 rounded-xl shadow">
-                                    <h4 className="text-sm font-semibold opacity-75">Ending Equity</h4>
-                                    <p className="text-xl font-bold mt-1">${fmt2(weekData.endEquity)}</p>
-                                </div>
-                                <div className="bg-gray-700 p-4 rounded-xl shadow">
-                                   <h4 className="text-sm font-semibold opacity-75">Weekly %</h4>
-                                   <p className={`text-lg font-bold flex items-center space-x-1 ${weeklyPercent >= 0 ? 'text-green-400' : 'text-red-500'}`}>
-                                   {weeklyPercent >= 0 ?(<>
-                                   <span>▲</span> <span>{fmt2(weeklyPercent)}%</span></>) : (<><span>▼</span>
-                                   <span>{fmt2(Math.abs(weeklyPercent))}%</span></>)} </p>
-                                </div>
-                            </div>
-                            <div className="mt-8">
-                                <h4 className="text-xl font-bold mb-4 text-white">Daily Breakdown</h4>
-                                {/* --- Daily Breakdown Table --- */}
-<div className="overflow-x-auto">
-  <table className="min-w-full text-sm border border-gray-700 rounded-lg overflow-hidden">
-    <thead className="bg-gray-800 text-gray-300">
-      <tr>
-        <th className="px-4 py-2">Date</th>
-        <th className="px-4 py-2">Day</th>
-        <th className="px-4 py-2">Wins</th>
-        <th className="px-4 py-2">Losses</th>
-        <th className="px-4 py-2">Breakeven</th>
-        <th className="px-4 py-2">P&L ($)</th>
-        <th className="px-4 py-2">P&L (%)</th>
-        <th className="px-4 py-2">Action</th>
-      </tr>
-    </thead>
+return (
+  <div className="space-y-8 max-w-7xl mx-auto py-8 text-gray-200">
+    <div className="bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700">
+      {/* Header */}
+      <div className="flex justify-between items-center mb-4">
+        <h3 className="text-2xl font-bold text-white">Weekly Review</h3>
+        <div className="flex space-x-2">
+          <button
+            onClick={() => setSelectedWeek((w) => (w > 1 ? w - 1 : w))}
+            className={`${styles.smallButton}`}
+          >
+            &lt; Prev
+          </button>
+          <span className="text-lg font-semibold text-white px-4 py-2 rounded-full bg-gray-700">
+            Week {selectedWeek} (
+            {getWeekRange(selectedWeek, new Date().getFullYear()).start} -{" "}
+            {getWeekRange(selectedWeek, new Date().getFullYear()).end})
+          </span>
+          <button
+            onClick={() => setSelectedWeek((w) => (w < 52 ? w + 1 : w))}
+            className={`${styles.smallButton}`}
+          >
+            Next &gt;
+          </button>
+        </div>
+      </div>
 
-  <tbody>
-  {dailyBreakdown.length > 0 ? (
-    dailyBreakdown.map((data) => {
-      const dateKey = data.dateKey;
-      const pct = typeof data.totalPnL === "number" && capital
-        ? Number(((data.totalPnL / capital) * 100).toFixed(2))
-        : 0;
+      {/* Grouped Weekly Stats */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mt-6">
+        {/* 📊 Equity & Performance */}
+        <div className="space-y-4">
+          <h4 className="text-lg font-bold text-white mb-2">
+            Equity & Performance
+          </h4>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* Starting Equity */}
+            <div className="bg-gray-700 p-4 rounded-xl shadow">
+              <h5 className="text-sm font-semibold opacity-75">
+                Starting Equity
+              </h5>
+              <p className="text-xl font-bold mt-1">
+                ${fmt2(weekData.startEquity)}
+              </p>
+            </div>
 
-      return (
-        <tr key={data.id} className="border-t border-gray-700 text-gray-300">
-          <td className="px-4 py-3">
-            {dateKey ? new Date(dateKey).toLocaleDateString("en-GB") : dateKey}
-          </td>
-          <td className="px-4 py-3">{data.day}</td>
-          <td className="px-4 py-3">{data.wins}</td>
-          <td className="px-4 py-3">{data.losses}</td>
-          <td className="px-4 py-3">{data.breakeven}</td>
-          <td className={`px-4 py-3 font-semibold ${data.totalPnL >= 0 ? "text-green-500" : "text-red-500"}`}>
-            ${fmt2(data.totalPnL)}
-          </td>
-          <td className={`px-4 py-3 font-semibold flex items-center space-x-1 ${pct >= 0 ? "text-green-500" : "text-red-500"
-                  }`}
-                >
-                  {pct >= 0 ? (
-                    <>
-                      <span>▲</span>
-                      <span>{fmt2(pct)}%</span>
-                    </>
-                  ) : (
-                    <>
-                      <span>▼</span>
-                      <span>{fmt2(Math.abs(pct))}%</span>
-                    </>
-                  )} </td>
-          <td className="px-4 py-3">
-            <button
-  onClick={() => openDailyDetails(data.dateKey, data.id)}
-  className="text-sm px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded"
->
-  More
-</button>
+            {/* Total P&L */}
+            <div className="bg-gray-700 p-4 rounded-xl shadow">
+              <h5 className="text-sm font-semibold opacity-75">Total P&L</h5>
+              <p
+                className={`text-xl font-bold mt-1 ${
+                  weekData.totalPnL >= 0 ? "text-green-400" : "text-red-400"
+                }`}
+              >
+                ${fmt2(weekData.totalPnL)}
+              </p>
+            </div>
 
+            {/* Total Trades */}
+            <div className="bg-gray-700 p-4 rounded-xl shadow">
+              <h5 className="text-sm font-semibold opacity-75">Total Trades</h5>
+              <p className="text-xl font-bold mt-1">
+                {weekData.trades.length}
+              </p>
+            </div>
 
-          </td>
-        </tr>
-      );
-    })
-  ) : (
-    <tr>
-      <td colSpan="9" className="text-center py-4 text-gray-500">No daily data.</td>
-    </tr>
-  )}
-</tbody>
-  </table>
-</div>
+            {/* Weekly % */}
+            <div className="bg-gray-700 p-4 rounded-xl shadow col-span-1 md:col-span-2">
+              <h5 className="text-sm font-semibold opacity-75">Weekly %</h5>
+              <p
+                className={`text-lg font-bold flex items-center space-x-1 ${
+                  weeklyPercent >= 0 ? "text-green-400" : "text-red-500"
+                }`}
+              >
+                {weeklyPercent >= 0 ? (
+                  <>
+                    <span>▲</span> <span>{fmt2(weeklyPercent)}%</span>
+                  </>
+                ) : (
+                  <>
+                    <span>▼</span>
+                    <span>{fmt2(Math.abs(weeklyPercent))}%</span>
+                  </>
+                )}
+              </p>
+            </div>
+
+            {/* Ending Equity */}
+            <div className="bg-gray-700 p-4 rounded-xl shadow">
+              <h5 className="text-sm font-semibold opacity-75">Ending Equity</h5>
+              <p className="text-xl font-bold mt-1">
+                ${fmt2(weekData.endEquity)}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* 💱 Pair Analysis */}
+        <div className="space-y-4">
+          <h4 className="text-lg font-bold text-white mb-2">Pair Analysis</h4>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Most Traded Pair */}
+            <div className="bg-gray-700 p-4 rounded-xl shadow">
+              <h5 className="text-sm font-semibold opacity-75">
+                Most Traded Pair
+              </h5>
+              <p className="text-xl font-bold mt-1">
+                {weekData.mostTradedPair || "—"}
+              </p>
+            </div>
+
+            {/* Most Profitable Pair */}
+            <div className="bg-gray-700 p-4 rounded-xl shadow">
+              <h5 className="text-sm font-semibold opacity-75">
+                Most Profitable Pair
+              </h5>
+              <p className="text-xl font-bold mt-1 text-green-400">
+                {weekData.mostProfitablePair || "—"}
+              </p>
+            </div>
+
+            {/* Most Losing Pair */}
+            <div className="bg-gray-700 p-4 rounded-xl shadow">
+              <h5 className="text-sm font-semibold opacity-75">
+                Most Losing Pair
+              </h5>
+              <p className="text-xl font-bold mt-1 text-red-400">
+                {weekData.mostLosingPair || "—"}
+              </p>
+            </div>
+
+            {/* Breakeven Pairs */}
+            <div className="bg-gray-700 p-4 rounded-xl shadow">
+              <h5 className="text-sm font-semibold opacity-75">
+                Breakeven Pairs
+              </h5>
+              <p className="text-xl font-bold mt-1">
+                {weekData.breakevenPairs && weekData.breakevenPairs.length > 0
+                  ? weekData.breakevenPairs.join(", ")
+                  : "—"}
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* --- Daily Breakdown Section --- */}
+      <div className="mt-8">
+        <h4 className="text-xl font-bold mb-4 text-white">Daily Breakdown</h4>
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-sm border border-gray-700 rounded-lg overflow-hidden">
+            <thead className="bg-gray-800 text-gray-300">
+              <tr>
+                <th className="px-4 py-2">Date</th>
+                <th className="px-4 py-2">Day</th>
+                <th className="px-4 py-2">Wins</th>
+                <th className="px-4 py-2">Losses</th>
+                <th className="px-4 py-2">Breakeven</th>
+                <th className="px-4 py-2">P&L ($)</th>
+                <th className="px-4 py-2">P&L (%)</th>
+                <th className="px-4 py-2">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {dailyBreakdown.length > 0 ? (
+                dailyBreakdown.map((data) => {
+                  const dateKey = data.dateKey;
+                  const pct =
+                    typeof data.totalPnL === "number" && capital
+                      ? Number(((data.totalPnL / capital) * 100).toFixed(2))
+                      : 0;
+
+                  return (
+                    <tr
+                      key={data.id}
+                      className="border-t border-gray-700 text-gray-300"
+                    >
+                      <td className="px-4 py-3">
+                        {dateKey
+                          ? new Date(dateKey).toLocaleDateString("en-GB")
+                          : dateKey}
+                      </td>
+                      <td className="px-4 py-3">{data.day}</td>
+                      <td className="px-4 py-3">{data.wins}</td>
+                      <td className="px-4 py-3">{data.losses}</td>
+                      <td className="px-4 py-3">{data.breakeven}</td>
+                      <td
+                        className={`px-4 py-3 font-semibold ${
+                          data.totalPnL >= 0
+                            ? "text-green-500"
+                            : "text-red-500"
+                        }`}
+                      >
+                        ${fmt2(data.totalPnL)}
+                      </td>
+                      <td
+                        className={`px-4 py-3 font-semibold flex items-center space-x-1 ${
+                          pct >= 0 ? "text-green-500" : "text-red-500"
+                        }`}
+                      >
+                        {pct >= 0 ? (
+                          <>
+                            <span>▲</span>
+                            <span>{fmt2(pct)}%</span>
+                          </>
+                        ) : (
+                          <>
+                            <span>▼</span>
+                            <span>{fmt2(Math.abs(pct))}%</span>
+                          </>
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        <button
+                          onClick={() => openDailyDetails(data.dateKey, data.id)}
+                          className="text-sm px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded"
+                        >
+                          More
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })
+              ) : (
+                <tr>
+                  <td
+                    colSpan="9"
+                    className="text-center py-4 text-gray-500"
+                  >
+                    No daily data.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
 {/* ✅ Weekly Equity Growth Chart */}
 <div className="mt-10 bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700">
   <h4 className="text-xl font-bold mb-4 text-white">Weekly Equity Growth</h4>
@@ -2116,21 +2949,81 @@ const weeklyRiskData = [...weekData.trades]
     <ResponsiveContainer width="100%" height="100%">
       <LineChart data={weeklyDailyRiskData}>
         <CartesianGrid strokeDasharray="3 3" stroke="#4a5568" />
-        <XAxis dataKey="date" stroke="#cbd5e0"tickFormatter={(d) => {
-    const dt = new Date(d);
-    return dt.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });}}/>
-    <YAxis stroke="#cbd5e0" />
-        <Tooltip contentStyle={{ backgroundColor: '#2d3748', border: 'none', borderRadius: '8px' }} labelStyle={{ color: '#fff' }} />
-        <Line type="monotone" dataKey="risk" stroke="#82ca9d" strokeWidth={2} dot={{ stroke: '#82ca9d', strokeWidth: 2, r: 4 }} />
-        <Line type="monotone" dataKey="dailyLimit" stroke="#ff7300" dot={false} strokeDasharray="5 5" strokeWidth={2} />
+
+        {/* X-Axis with formatted dates */}
+        <XAxis
+          dataKey="date"
+          stroke="#cbd5e0"
+          tickFormatter={(d) => {
+            const dt = new Date(d);
+            return dt.toLocaleDateString("en-GB", {
+              weekday: "short",
+              day: "numeric",
+              month: "short",
+            });
+          }}
+        />
+
+        {/* Y-Axis with percentage format */}
+        <YAxis
+          stroke="#cbd5e0"
+          domain={riskDomain}
+          tickFormatter={(v) => `${v}%`}
+        />
+
+        {/* Tooltip */}
+        <Tooltip
+          contentStyle={{
+            backgroundColor: "#2d3748",
+            border: "none",
+            borderRadius: "8px",
+          }}
+          labelStyle={{ color: "#fff" }}
+        />
+
+        {/* Horizontal ReferenceLine for each day's risk */}
+        {weeklyDailyRiskData.map((item) => (
+          <ReferenceLine
+            key={item.date}
+            y={item.risk}
+            stroke="#7dd3fc"
+            strokeDasharray="4 4"
+            label={{
+              position: "right",
+              value: `${new Date(item.date).toLocaleDateString("en-GB", {
+                weekday: "short",
+              })} ${item.risk}%`,
+              fill: "#7dd3fc",
+            }}
+          />
+        ))}
+
+        {/* Risk Line */}
+        <Line
+          type="monotone"
+          dataKey="risk"
+          stroke="#82ca9d"
+          strokeWidth={2}
+          dot={{ stroke: "#82ca9d", strokeWidth: 2, r: 4 }}
+        />
+
+        {/* Daily Limit Line */}
+        <Line
+          type="monotone"
+          dataKey="dailyLimit"
+          stroke="#ff7300"
+          dot={false}
+          strokeDasharray="5 5"
+          strokeWidth={2}
+        />
       </LineChart>
     </ResponsiveContainer>
   </div>
-  </div>
+</div>
 
                             </div>
                         </div>
-                        {/* DAILY DETAILS (More) Modal */}
+
 {/* DAILY DETAILS (More) Modal */}
 <Modal
   isOpen={dailyDetailsOpen}
@@ -2150,6 +3043,7 @@ const weeklyRiskData = [...weekData.trades]
           key={t.id}
           className="bg-gray-700 p-3 rounded-md border border-gray-600"
         >
+          {/* Pair + Action */}
           <div className="flex justify-between items-start">
             <div>
               <p className="text-sm text-gray-300">Pair</p>
@@ -2167,6 +3061,7 @@ const weeklyRiskData = [...weekData.trades]
             </div>
           </div>
 
+          {/* Trade Details */}
           <div className="grid grid-cols-2 gap-3 mt-3 text-sm text-gray-300">
             <div>
               <p className="text-xs text-gray-400">Entry Date</p>
@@ -2209,6 +3104,7 @@ const weeklyRiskData = [...weekData.trades]
               <p className="capitalize">{t.status || "—"}</p>
             </div>
 
+            {/* PnL */}
             <div className="col-span-2">
               <p className="text-xs text-gray-400">P&L ($) / P&L (%)</p>
               <p
@@ -2292,41 +3188,29 @@ const weeklyRiskData = [...weekData.trades]
           </div>
 
           {/* Notes / Strategy / Session */}
-          <div className="mt-3">
-            <label className="text-xs text-gray-400">Note</label>
-            <textarea
-              value={t.note || ""}
-              onChange={(e) => {
-                setSelectedDayTrades((prev) =>
-                  prev.map((x) =>
-                    x.id === t.id ? { ...x, note: e.target.value } : x
-                  )
-                );
-              }}
-              className="w-full mt-1 p-2 bg-gray-800 text-white rounded"
-              rows={2}
-            />
-            <div className="grid grid-cols-2 gap-3 mt-2">
-              <div>
-                <label className="text-xs text-gray-400">Strategy</label>
-                <input
-                  value={t.strategy || ""}
-                  onChange={(e) =>
-                    setSelectedDayTrades((prev) =>
-                      prev.map((x) =>
-                        x.id === t.id ? { ...x, strategy: e.target.value } : x
-                      )
-                    )
-                  }
-                  className="w-full mt-1 p-2 bg-gray-800 text-white rounded"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-gray-400">Session</label>
-                <p className="mt-1 p-2 bg-gray-800 text-white rounded">
-                  {t.session || "—"}
-                </p>
-              </div>
+          <div className="mt-3 grid grid-cols-1 gap-3 text-sm">
+            {/* Note */}
+            <div>
+              <label className="text-xs text-gray-400">Note</label>
+              <p className="mt-1 p-2 bg-gray-800 text-white rounded">
+                {t.note || "—"}
+              </p>
+            </div>
+
+            {/* Strategy */}
+            <div>
+              <label className="text-xs text-gray-400">Strategy</label>
+              <p className="mt-1 p-2 bg-gray-800 text-white rounded">
+                {t.strategy || "—"}
+              </p>
+            </div>
+
+            {/* Session */}
+            <div>
+              <label className="text-xs text-gray-400">Session</label>
+              <p className="mt-1 p-2 bg-gray-800 text-white rounded">
+                {t.session || "—"}
+              </p>
             </div>
           </div>
         </div>
@@ -2340,175 +3224,319 @@ const weeklyRiskData = [...weekData.trades]
     </div>
   </div>
 </Modal>
+ </div>
+);
+}
+case "settings":
+  return (
+    <div className="flex max-w-7xl mx-auto py-8 text-gray-200">
+      {/* Sidebar */}
+      <aside className="w-64 mr-8 bg-gray-900 rounded-2xl shadow-lg border border-gray-700 p-6">
+        <h2 className="text-xl font-bold mb-6 text-white">Settings</h2>
+        <nav className="space-y-3">
+          {/* User Settings */}
+          <button
+            onClick={() => setSettingsView("user")}
+            className={`block w-full text-left px-4 py-2 rounded-lg transition ${
+              settingsView === "user"
+                ? "bg-purple-600 text-white font-semibold"
+                : "bg-gray-800 hover:bg-gray-700 text-gray-300"
+            }`}
+          >
+            User Settings
+          </button>
 
-{/* 🔍 Fullscreen Image Preview */}
-<Modal
-  isOpen={!!imagePreview}
-  onClose={() => setImagePreview(null)}
-  title="Image Preview"
->
-  {imagePreview && (
-    <div className="flex items-center justify-center">
-      <img
-        src={imagePreview}
-        alt="Trade Preview"
-        className="max-h-[80vh] max-w-full rounded-lg shadow-lg"
+          {/* Theme */}
+          <button
+            onClick={() => setSettingsView("theme")}
+            className={`block w-full text-left px-4 py-2 rounded-lg transition ${
+              settingsView === "theme"
+                ? "bg-purple-600 text-white font-semibold"
+                : "bg-gray-800 hover:bg-gray-700 text-gray-300"
+            }`}
+          >
+            Theme
+          </button>
+
+          {/* Deposit & Withdrawal (only if enabled in user settings) */}
+          {userSettings?.depositEnabled && (
+            <button
+              onClick={() => setSettingsView("funds")}
+              className={`block w-full text-left px-4 py-2 rounded-lg transition ${
+                settingsView === "funds"
+                  ? "bg-purple-600 text-white font-semibold"
+                  : "bg-gray-800 hover:bg-gray-700 text-gray-300"
+              }`}
+            >
+              Deposit & Withdrawal
+            </button>
+          )}
+
+          {/* Data Management */}
+          <button
+            onClick={() => setSettingsView("data")}
+            className={`block w-full text-left px-4 py-2 rounded-lg transition ${
+              settingsView === "data"
+                ? "bg-purple-600 text-white font-semibold"
+                : "bg-gray-800 hover:bg-gray-700 text-gray-300"
+            }`}
+          >
+            Data Management
+          </button>
+
+          {/* Logout */}
+          <button
+            onClick={() => setSettingsView("logout")}
+            className={`block w-full text-left px-4 py-2 rounded-lg transition ${
+              settingsView === "logout"
+                ? "bg-red-600 text-white font-semibold"
+                : "bg-gray-800 hover:bg-gray-700 text-gray-300"
+            }`}
+          >
+            Logout
+          </button>
+        </nav>
+      </aside>
+
+      {/* Content area */}
+      <main className="flex-1 bg-gray-800 rounded-2xl shadow-lg border border-gray-700 p-8">
+        {/* User Settings */}
+        {settingsView === "user" && (
+          <div>
+            <h2 className="text-2xl font-bold mb-6 text-white">User Settings</h2>
+            <UserSettingsForm
+              onSave={(settings) => {
+                setUserSettings(settings);
+
+                if (settings.startingCapital) setCapital(settings.startingCapital);
+                if (settings.accountName) {
+                  setFormData((prev) => ({
+                    ...prev,
+                    accountName: settings.accountName,
+                  }));
+                }
+                if (settings.accountPlan) {
+                  setFormData((prev) => ({
+                    ...prev,
+                    accountPlan: settings.accountPlan,
+                  }));
+                }
+                if (settings.accountType) {
+                  setFormData((prev) => ({
+                    ...prev,
+                    accountType: settings.accountType,
+                  }));
+                }
+
+                localStorage.setItem("userSettings", JSON.stringify(settings));
+
+                if (journalDocRef) {
+                  setDoc(journalDocRef, { userSettings: settings }, { merge: true });
+                }
+              }}
+            />
+          </div>
+        )}
+
+        {/* Theme */}
+        {settingsView === "theme" && (
+          <div>
+            <h2 className="text-2xl font-bold mb-6 text-white">Theme</h2>
+            <button onClick={handleThemeToggle} className={styles.smallButton}>
+              Switch to {theme === "dark" ? "Light" : "Dark"} Theme
+            </button>
+          </div>
+        )}
+
+        {/* Deposit & Withdrawal */}
+        {settingsView === "funds" && userSettings?.depositEnabled && (
+          <div>
+            <h2 className="text-2xl font-bold mb-6 text-white">Deposit & Withdrawal</h2>
+
+            {/* Deposit Section */}
+            {userSettings?.depositEnabled && (
+              <div className="mb-8 p-4 bg-gray-900 rounded-lg shadow">
+                <h3 className="text-lg font-semibold text-green-400 mb-3">Deposit</h3>
+                <input
+                  type="number"
+                  placeholder="Enter amount ($)"
+                  value={depositAmount}
+                  onChange={(e) => setDepositAmount(e.target.value)}
+                  className="w-full p-2 rounded bg-gray-800 border border-gray-700 text-white mb-3"
+                />
+                <button
+                  onClick={handleFundsDeposit}
+                  className="bg-green-600 hover:bg-green-700 text-white font-medium px-6 py-2 rounded-lg"
+                >
+                  Deposit
+                </button>
+              </div>
+            )}
+
+            {/* Withdrawal Section */}
+            {userSettings?.withdrawalEnabled && (
+              <div className="p-4 bg-gray-900 rounded-lg shadow">
+                <h3 className="text-lg font-semibold text-red-400 mb-3">Withdrawal</h3>
+                <input
+                  type="number"
+                  placeholder="Enter amount ($)"
+                  value={withdrawAmount}
+                  onChange={(e) => setWithdrawAmount(e.target.value)}
+                  className="w-full p-2 rounded bg-gray-800 border border-gray-700 text-white mb-3"
+                />
+                <button
+                  onClick={handleFundsWithdrawal}
+                  className="bg-red-600 hover:bg-red-700 text-white font-medium px-6 py-2 rounded-lg"
+                >
+                  Withdraw
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+       {/* Data Management Section */}
+{settingsView === "data" && (
+  <div className="space-y-4 mt-4">
+    {/* Export */}
+    <button
+      onClick={handleExportData}
+      className="w-full bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg font-medium transition"
+    >
+      Export Data
+    </button>
+
+    {/* Import */}
+    <div>
+      <input
+        type="file"
+        accept="application/json"
+        onChange={handleImportData}
+        id="import-file"
+        className="hidden"
       />
+      <label
+        htmlFor="import-file"
+        className="w-full block text-center bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded-lg font-medium cursor-pointer transition"
+      >
+        Import Data
+      </label>
     </div>
-  )}
-</Modal>
 
-                    </div>
-                  
-                );
-            
-            }
-            case "settings":
-                return (
-                    <div className="space-y-8 max-w-7xl mx-auto py-8 text-gray-200">
-                        <h2 className="text-3xl font-bold mb-6 text-white">Settings</h2>
+    {/* Reset */}
+    <button
+      onClick={handleResetAccount}
+      className="w-full bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded-lg font-medium transition"
+    >
+      Reset Account
+    </button>
+  </div>
+)}
 
-                        {/* Capital Section */}
-                        <div className="bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700 space-y-4">
-                            <h3 className="text-xl font-bold text-white">Capital</h3>
-                            <div className="flex flex-col md:flex-row items-start md:items-center space-y-4 md:space-y-0 md:space-x-4">
-                                <label className="text-gray-400" htmlFor="capital-input">Current Capital: ${fmt2(capital)}</label>
-                                <input
-                                    type="number"
-                                    id="capital-input"
-                                    value={newCapital}
-                                    onChange={handleCapitalChange}
-                                    className={styles.input}
-                                    placeholder="Enter new capital"
-                                />
-                                <button onClick={handleSaveCapital} className={styles.smallButton}>
-                                    Save Capital
-                                </button>
-                            </div>
-                        </div>
 
-                        {/* Theme Section */}
-                        <div className="bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700 space-y-4">
-                            <h3 className="text-xl font-bold text-white">Theme</h3>
-                            <button onClick={handleThemeToggle} className={styles.smallButton}>
-                                Switch to {theme === 'dark' ? 'Light' : 'Dark'} Theme
-                            </button>
-                        </div>
-                        
-                        {/* Account Type Section */}
-                        <div className="bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700 space-y-4">
-                            <h3 className="text-xl font-bold text-white">Account Type</h3>
-                            <div className="flex flex-col md:flex-row items-start md:items-center space-y-4 md:space-y-0 md:space-x-4">
-                                <label className="text-gray-400" htmlFor="account-type-select">Select your account type</label>
-                                <select
-                                    id="account-type-select"
-                                    name="accountType"
-                                    value={formData.accountType}
-                                    onChange={handleChange}
-                                    className={styles.input}
-                                >
-                                    <option value="Standard">Standard</option>
-                                    <option value="Micro">Micro</option>
-                                    <option value="Mini">Mini</option>
-                                </select>
-                            </div>
-                        </div>
+        {/* Logout */}
+        {settingsView === "logout" && (
+          <div>
+            <h2 className="text-2xl font-bold mb-6 text-white">Logout</h2>
+            <button
+              onClick={handleLogout}
+              className="bg-red-600 text-white font-medium py-2 px-6 rounded-full shadow-lg hover:bg-red-700 transition-colors duration-200"
+            >
+              Logout
+            </button>
+          </div>
+        )}
+      </main>
+    </div>
+  );
 
-                        {/* Logout Section */}
-                        <div className="bg-gray-800 p-6 rounded-2xl shadow-lg border border-gray-700 space-y-4">
-                            <h3 className="text-xl font-bold text-white">Logout</h3>
-                            <button onClick={handleLogout} className="bg-red-600 text-white font-medium py-2 px-6 rounded-full shadow-lg hover:bg-red-700 transition-colors duration-200">
-                                Logout
-                            </button>
-                        </div>
-                    </div>
-                );
+
+
+
             default:
                 return null;
         }
     };
+// ✅ App return
+if (!userId) {
+  // 🔑 If no user → show login/signup screen
+  return <AuthPage onLogin={setUserId} />;
+}
 
- return (
-    <div
-      className={`min-h-screen font-sans ${
-        theme === "dark"
-          ? "bg-gray-900 text-white"
-          : "bg-gray-100 text-gray-900"
-      }`}
-    >
-      {!userId ? (
-        // 🔑 Show login/signup page if no user
-        <AuthPage onLogin={setUserId} />
-      ) : (
-        // ✅ Main app UI after login
-        <>
-          <header className="p-4 shadow-lg sticky top-0 z-10 backdrop-blur-md bg-opacity-70">
-            <nav className={styles.navContainer}>
-              <div className={styles.navTabs}>
-                <button
-                  onClick={() => setActiveTab("dashboard")}
-                  className={
-                    activeTab === "dashboard"
-                      ? styles.activeTab
-                      : styles.inactiveTab
-                  }
-                >
-                  Dashboard
-                </button>
-                <button
-                  onClick={() => setActiveTab("tradeLog")}
-                  className={
-                    activeTab === "tradeLog"
-                      ? styles.activeTab
-                      : styles.inactiveTab
-                  }
-                >
-                  Trade Log
-                </button>
-                <button
-                  onClick={() => setActiveTab("weeklyReview")}
-                  className={
-                    activeTab === "weeklyReview"
-                      ? styles.activeTab
-                      : styles.inactiveTab
-                  }
-                >
-                  Weekly Review
-                </button>
-                <button
-                  onClick={() => setActiveTab("settings")}
-                  className={
-                    activeTab === "settings"
-                      ? styles.activeTab
-                      : styles.inactiveTab
-                  }
-                >
-                  Settings
-                </button>
-              </div>
+return (
+  <div
+    className={`min-h-screen font-sans ${
+      theme === "dark"
+        ? "bg-gray-900 text-white"
+        : "bg-gray-100 text-gray-900"
+    }`}
+  >
+    {!userId ? (
+      // 🔑 Show login/signup page if no user
+      <AuthPage onLogin={setUserId} />
+      ) : !userSettings ? (
+  <UserSettingsForm onSave={setUserSettings} />
+    ) : (
+      // ✅ Main app UI after login
+      <>
+        <header className="p-4 shadow-lg sticky top-0 z-10 backdrop-blur-md bg-opacity-70">
+          <nav className={styles.navContainer}>
+            <div className={styles.navTabs}>
+              <button
+                onClick={() => setActiveTab("dashboard")}
+                className={
+                  activeTab === "dashboard"
+                    ? styles.activeTab
+                    : styles.inactiveTab
+                }
+              >
+                Dashboard
+              </button>
+              <button
+                onClick={() => setActiveTab("tradeLog")}
+                className={
+                  activeTab === "tradeLog"
+                    ? styles.activeTab
+                    : styles.inactiveTab
+                }
+              >
+                Trade Log
+              </button>
+              <button
+                onClick={() => setActiveTab("weeklyReview")}
+                className={
+                  activeTab === "weeklyReview"
+                    ? styles.activeTab
+                    : styles.inactiveTab
+                }
+              >
+                Weekly Review
+              </button>
+              <button
+                onClick={() => setActiveTab("settings")}
+                className={
+                  activeTab === "settings"
+                    ? styles.activeTab
+                    : styles.inactiveTab
+                }
+              >
+                Settings
+              </button>
+            </div>
+          </nav>
+        </header>
 
-              <div>
-                <button
-                  onClick={handleLogout}
-                  className="px-3 py-1 bg-red-600 text-white rounded text-sm"
-                >
-                  Log Out
-                </button>
-              </div>
-            </nav>
-          </header>
-
-          <main className="p-4">
-            {renderContent()}
-            {userId && (
-              <p className="mt-4 text-sm text-gray-400">
-                Logged in as:{" "}
-                <span className="font-semibold">{userId}</span>
-              </p>
-            )}
-          </main>
-        </>
-      )}
-    </div>
-  );
+        <main className="p-4">
+          {renderContent()}
+          {userId && (
+            <p className="mt-4 text-sm text-gray-400">
+              Logged in as:{" "}
+              <span className="font-semibold">{userId}</span>
+            </p>
+          )}
+        </main>
+      </>
+    )}
+  </div>
+);
 }

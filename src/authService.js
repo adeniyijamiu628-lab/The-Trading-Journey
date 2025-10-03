@@ -1,35 +1,65 @@
-import { 
-  createUserWithEmailAndPassword, 
-  signInWithEmailAndPassword, 
-  signOut 
-} from "firebase/auth";
-import { auth } from "./firebase";   // ✅ make sure path is correct
+// src/authService.js
+import { supabase } from "./supabaseClient";
 
-// ✅ Register a new user
-export const registerUser = async (email, password) => {
+// --- Sign Up ---
+export const signUp = async (email, password) => {
   try {
-    const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-    return userCredential.user;  // has user.uid, email, etc
-  } catch (error) {
-    throw error;
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+    });
+    return { data, error };
+  } catch (err) {
+    console.error("SignUp error:", err);
+    return { data: null, error: err };
   }
 };
 
-// ✅ Log in an existing user
-export const loginUser = async (email, password) => {
+// --- Sign In ---
+export const signIn = async (email, password) => {
   try {
-    const userCredential = await signInWithEmailAndPassword(auth, email, password);
-    return userCredential.user;
-  } catch (error) {
-    throw error;
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+    return { data, error };
+  } catch (err) {
+    console.error("SignIn error:", err);
+    return { data: null, error: err };
   }
 };
 
-// ✅ Log out
-export const logoutUser = async () => {
+// --- Sign Out ---
+export const signOut = async () => {
   try {
-    await signOut(auth);
-  } catch (error) {
-    throw error;
+    const { error } = await supabase.auth.signOut();
+    return { error };
+  } catch (err) {
+    console.error("SignOut error:", err);
+    return { error: err };
   }
+};
+
+// --- Get Current Session ---
+export const getCurrentSession = async () => {
+  try {
+    const { data, error } = await supabase.auth.getSession();
+    return { data, error };
+  } catch (err) {
+    console.error("GetSession error:", err);
+    return { data: null, error: err };
+  }
+};
+
+// --- Listen to Auth State Changes ---
+export const onAuthStateChange = (callback) => {
+  const { data, error } = supabase.auth.onAuthStateChange((_event, session) => {
+    callback(session?.user ?? null);
+  });
+
+  if (error) {
+    console.error("Auth state change error:", error);
+  }
+
+  return data.subscription; // ✅ return subscription directly
 };
