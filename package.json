@@ -12,11 +12,16 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.4",
-    "dayjs": "^1.11.18",
+    "dayjs": "^1.11.19",
     "firebase": "^12.2.1",
+    "framer-motion": "^12.23.24",
+    "lucide-react": "^0.544.0",
+    "prop-types": "^15.8.1",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
-    "recharts": "^3.1.2"
+    "react-hot-toast": "^2.6.0",
+    "recharts": "^3.3.0",
+    "uuid": "^13.0.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.33.0",
